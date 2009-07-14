@@ -1743,6 +1743,7 @@ static struct rtnl_link_ops ipgre_tap_ops __read_mostly = {
 #define IP_TUNNEL(ertunnel)	((struct ip_tunnel *)(ertunnel) - 1)
 
 #define ER_ANNOUNCE_TIME	(5 * HZ)
+#define ER_EXPIRE_TIME		(5 * ER_ANNOUNCE_TIME)
 
 struct er_vlan {
 	struct rb_node		vl_node;
@@ -1759,6 +1760,7 @@ struct er_iface {
 	struct net_device *	if_dev;
 	__be32			if_daddr;
 	struct packet_type	if_pack;
+	unsigned long		if_expire;
 };
 
 struct er_sre {
@@ -1891,6 +1893,7 @@ ipgre_er_routing(struct ip_tunnel *tunnel, struct sk_buff *skb)
 		ifid = ipgre_er_ifid(haddr);
 		if ((iface = ipgre_er_iface_lookup(&vlan->vl_dst, ifid))) {
 			iface->if_daddr = daddr;
+			iface->if_expire = jiffies + ER_EXPIRE_TIME;
 			continue;
 		}
 
@@ -1900,6 +1903,7 @@ ipgre_er_routing(struct ip_tunnel *tunnel, struct sk_buff *skb)
 			return;
 		}
 		iface->if_daddr = daddr;
+		iface->if_expire = jiffies + ER_EXPIRE_TIME;
 
 		vlan->vl_ndst++;
 	}
@@ -2327,17 +2331,24 @@ ipgre_er_timer(unsigned long data)
 	struct er_tunnel *ertunnel = (struct er_tunnel *)data;
 	struct ip_tunnel *tunnel = IP_TUNNEL(ertunnel);
 	struct er_vlan *vlan;
-	struct rb_node *p;
+	struct er_iface *iface;
+	struct rb_node *p, *pp;
 
 	if (!(tunnel->dev->flags & IFF_UP))
 		goto done;
 
-	read_lock(&ipgre_lock);
+	write_lock(&ipgre_lock);
 	for (p = rb_first(&ertunnel->er_vlans); p; p = rb_next(p)) {
 		vlan = rb_entry(p, struct er_vlan, vl_node);
 		ipgre_er_announce(ertunnel, vlan);
+
+		for (pp = rb_first(&vlan->vl_dst); pp; pp = rb_next(pp)) {
+			iface = rb_entry(pp, struct er_iface, if_node);
+			if (time_after(jiffies, iface->if_expire))
+				ipgre_er_iface_destroy(&vlan->vl_dst, iface);
+		}
 	}
-	read_unlock(&ipgre_lock);
+	write_unlock(&ipgre_lock);
 
 done:
 	mod_timer(&ertunnel->er_timer, jiffies + ER_ANNOUNCE_TIME);
