@@ -1864,7 +1864,7 @@ ipgre_er_routing(struct ip_tunnel *tunnel, struct sk_buff *skb)
 	if (sre->sre_af != __constant_htons(ETH_P_TEB))
 		return;
 	len = ntohs(sre->sre_len);
-	if (skb->len != sizeof(*sre) + len);
+	if (skb->len != sizeof(*sre) + len)
 		return;
 	if (len < ETH_ALEN || len % ETH_ALEN)
 		return;
