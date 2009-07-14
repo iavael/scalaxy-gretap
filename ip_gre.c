@@ -29,6 +29,7 @@
 #include <linux/netfilter_ipv4.h>
 #include <linux/etherdevice.h>
 #include <linux/if_ether.h>
+#include <linux/version.h>
 
 #include <net/sock.h>
 #include <net/ip.h>
@@ -48,6 +49,37 @@
 #include <net/ipv6.h>
 #include <net/ip6_fib.h>
 #include <net/ip6_route.h>
+#endif
+
+/*
+ * Backport changes in include/ from the following commits:
+ *
+ * c19e654ddbe3831252f61e76a74d661e1a755530
+ * gre: Add netlink interface
+ *
+ * e1a8000228e16212c93b23cfbed4d622e2ec7a6b
+ * gre: Add Transparent Ethernet Bridging
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
+enum
+{
+	IFLA_GRE_UNSPEC,
+	IFLA_GRE_LINK,
+	IFLA_GRE_IFLAGS,
+	IFLA_GRE_OFLAGS,
+	IFLA_GRE_IKEY,
+	IFLA_GRE_OKEY,
+	IFLA_GRE_LOCAL,
+	IFLA_GRE_REMOTE,
+	IFLA_GRE_TTL,
+	IFLA_GRE_TOS,
+	IFLA_GRE_PMTUDISC,
+	__IFLA_GRE_MAX,
+};
+
+#define IFLA_GRE_MAX   (__IFLA_GRE_MAX - 1)
+
+#define ETH_P_TEB	0x6558		/* Trans Ether Bridging		*/
 #endif
 
 /*
