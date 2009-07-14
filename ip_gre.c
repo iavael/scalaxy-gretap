@@ -30,6 +30,8 @@
 #include <linux/etherdevice.h>
 #include <linux/if_ether.h>
 #include <linux/version.h>
+#include <linux/rbtree.h>
+#include <linux/timer.h>
 
 #include <net/sock.h>
 #include <net/ip.h>
@@ -151,6 +153,21 @@ enum
    Alexey Kuznetsov.
  */
 
+#define IPGRE_ISER(tunnel)	((tunnel)->dev->type == ARPHRD_ETHER && \
+				ipv4_is_multicast((tunnel)->parms.iph.daddr))
+
+struct er_tunnel {
+	struct rb_root		er_vlans;
+	struct timer_list	er_timer;
+};
+
+static int ipgre_er_init(struct ip_tunnel *);
+static void ipgre_er_uninit(struct ip_tunnel *);
+
+static void ipgre_er_routing(struct ip_tunnel *, struct sk_buff *);
+static void ipgre_er_rx(struct ip_tunnel *, struct sk_buff *);
+static __be32 ipgre_er_dst(struct ip_tunnel *, struct sk_buff *);
+
 static struct rtnl_link_ops ipgre_link_ops __read_mostly;
 static int ipgre_tunnel_init(struct net_device *dev);
 static void ipgre_tunnel_setup(struct net_device *dev);
@@ -262,6 +279,12 @@ static struct ip_tunnel * ipgre_tunnel_lookup(struct net_device *dev,
 	}
 
 	for (t = ign->tunnels_l[h1]; t; t = t->next) {
+		if (IPGRE_ISER(t) && key == t->parms.i_key &&
+		    (t->dev->flags & IFF_UP) && t->dev->type == dev_type &&
+		    t->parms.link == link)
+			/* Ethernet Relay tunnel */
+			return t;
+
 		if ((local != t->parms.iph.saddr &&
 		     (local != t->parms.iph.daddr ||
 		      !ipv4_is_multicast(local))) ||
@@ -407,7 +430,8 @@ static struct ip_tunnel * ipgre_tunnel_locate(struct net *net,
 	else
 		sprintf(name, "gre%%d");
 
-	dev = alloc_netdev(sizeof(*t), name, ipgre_tunnel_setup);
+	dev = alloc_netdev(sizeof(*t) + sizeof(struct er_tunnel), name,
+			   ipgre_tunnel_setup);
 	if (!dev)
 	  return NULL;
 
@@ -440,6 +464,10 @@ static void ipgre_tunnel_uninit(struct net_device *dev)
 {
 	struct net *net = dev_net(dev);
 	struct ipgre_net *ign = net_generic(net, ipgre_net_id);
+	struct ip_tunnel *tunnel = netdev_priv(dev);
+
+	if (IPGRE_ISER(tunnel))
+		ipgre_er_uninit(tunnel);
 
 	ipgre_tunnel_unlink(ign, netdev_priv(dev));
 	dev_put(dev);
@@ -578,10 +606,8 @@ static int ipgre_rcv(struct sk_buff *skb)
 	flags = *(__be16*)h;
 
 	if (flags&(GRE_CSUM|GRE_KEY|GRE_ROUTING|GRE_SEQ|GRE_VERSION)) {
-		/* - Version must be 0.
-		   - We do not support routing headers.
-		 */
-		if (flags&(GRE_VERSION|GRE_ROUTING))
+		/* Version must be 0 */
+		if (flags&GRE_VERSION)
 			goto drop_nolock;
 
 		if (flags&GRE_CSUM) {
@@ -615,6 +641,21 @@ static int ipgre_rcv(struct sk_buff *skb)
 					  iph->saddr, iph->daddr, key,
 					  gre_proto))) {
 		struct net_device_stats *stats = &tunnel->dev->stats;
+
+		if (flags & GRE_ROUTING) {
+			/*
+			 * We do not support routing headers except for
+			 * Ethernet Relay.
+			 */
+			if (!IPGRE_ISER(tunnel))
+				goto drop;
+
+			read_unlock(&ipgre_lock);
+			skb_pull(skb, offset);
+			ipgre_er_routing(tunnel, skb);
+			kfree_skb(skb);
+			return 0;
+		}
 
 		secpath_reset(skb);
 
@@ -684,7 +725,10 @@ static int ipgre_rcv(struct sk_buff *skb)
 		skb_reset_network_header(skb);
 		ipgre_ecn_decapsulate(iph, skb);
 
-		netif_rx(skb);
+		if (IPGRE_ISER(tunnel))
+			ipgre_er_rx(tunnel, skb);
+		else
+			netif_rx(skb);
 		read_unlock(&ipgre_lock);
 		return(0);
 	}
@@ -768,6 +812,10 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 		else
 			goto tx_error;
 	}
+
+	if (IPGRE_ISER(tunnel))
+		if ((dst = ipgre_er_dst(tunnel, skb)) == 0)
+			goto tx_error;
 
 	tos = tiph->tos;
 	if (tos&1) {
@@ -971,6 +1019,7 @@ static int ipgre_tunnel_bind_dev(struct net_device *dev)
 		tdev = __dev_get_by_index(dev_net(dev), tunnel->parms.link);
 
 	if (tdev) {
+		tunnel->parms.link = tdev->ifindex;
 		hlen = tdev->hard_header_len + tdev->needed_headroom;
 		mtu = tdev->mtu;
 	}
@@ -1486,6 +1535,9 @@ static int ipgre_tap_init(struct net_device *dev)
 
 	ipgre_tunnel_bind_dev(dev);
 
+	if (IPGRE_ISER(tunnel))
+		ipgre_er_init(tunnel);
+
 	return 0;
 }
 
@@ -1683,6 +1735,677 @@ static struct rtnl_link_ops ipgre_tap_ops __read_mostly = {
 	.get_size	= ipgre_get_size,
 	.fill_info	= ipgre_fill_info,
 };
+
+/*
+ * Ethernet Relay over GRE.
+ */
+#define ER_TUNNEL(iptunnel)	(struct er_tunnel *)((iptunnel) + 1)
+#define IP_TUNNEL(ertunnel)	((struct ip_tunnel *)(ertunnel) - 1)
+
+#define ER_ANNOUNCE_TIME	(5 * HZ)
+
+struct er_vlan {
+	struct rb_node		vl_node;
+	int			vl_id;
+	struct rb_root		vl_src;
+	int			vl_nsrc;
+	struct rb_root		vl_dst;
+	int			vl_ndst;
+};
+
+struct er_iface {
+	struct rb_node		if_node;
+	int			if_id;
+	struct net_device *	if_dev;
+	__be32			if_daddr;
+	struct packet_type	if_pack;
+};
+
+struct er_sre {
+	__be16			sre_af;
+	__be16			sre_len;
+};
+
+static int  ipgre_er_iface_add_src(struct er_tunnel *, struct net_device *);
+static void ipgre_er_iface_del_src(struct er_tunnel *, struct net_device *);
+
+static struct er_vlan *ipgre_er_vlan_lookup(struct er_tunnel *, int);
+static struct er_vlan *ipgre_er_vlan_create(struct er_tunnel *, int);
+static void ipgre_er_vlan_destroy(struct er_tunnel *, struct er_vlan *);
+static void ipgre_er_vlan_insert(struct er_tunnel *, struct er_vlan *);
+static int  ipgre_er_vlan_join(struct er_tunnel *, struct er_vlan *);
+static void ipgre_er_vlan_leave(struct er_tunnel *, struct er_vlan *);
+
+static struct er_iface *ipgre_er_iface_lookup(struct rb_root *, int);
+static struct er_iface *ipgre_er_iface_create(struct rb_root *, int);
+static void ipgre_er_iface_destroy(struct rb_root *, struct er_iface *);
+static void ipgre_er_iface_insert(struct rb_root *, struct er_iface *);
+
+static void ipgre_er_announce(struct er_tunnel *, struct er_vlan *);
+static void ipgre_er_timer(unsigned long);
+
+static int ipgre_er_mac_addr(struct net_device *, void *);
+static int ipgre_er_ioctl(struct net_device *, struct ifreq *, int);
+static int ipgre_er_brctl(struct er_tunnel *, int, int);
+static int  ipgre_er_packet(struct sk_buff *, struct net_device *,
+    struct packet_type *, struct net_device *);
+
+static inline int
+ipgre_er_vlid(unsigned char *addr)
+{
+	return ((addr[3] << 7) | (addr[4] >> 1));
+}
+
+static inline int
+ipgre_er_ifid(unsigned char *addr)
+{
+	return ((addr[4] & 0x01) << 8 | addr[5]);
+}
+
+static inline __be32
+ipgre_er_vtog(int vlid)
+{
+	return htonl(0xefff0000 + vlid);
+}
+
+static inline int
+ipgre_er_gtov(__be32 group)
+{
+	return (ntohl(group) & 0xffff);
+}
+
+static int
+ipgre_er_init(struct ip_tunnel *tunnel)
+{
+	struct net_device *dev = tunnel->dev;
+	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
+
+	dev->do_ioctl = ipgre_er_ioctl;
+	dev->set_mac_address = ipgre_er_mac_addr;
+
+	ertunnel->er_vlans = RB_ROOT;
+	ipgre_er_iface_add_src(ertunnel, dev);
+
+	setup_timer(&ertunnel->er_timer, ipgre_er_timer,
+	    (unsigned long)ertunnel);
+	mod_timer(&ertunnel->er_timer, jiffies + ER_ANNOUNCE_TIME);
+
+	return 0;
+}
+
+static void
+ipgre_er_uninit(struct ip_tunnel *tunnel)
+{
+	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
+	struct er_vlan *vlan;
+	struct rb_node *p;
+
+	del_timer(&ertunnel->er_timer);
+
+	while ((p = rb_first(&ertunnel->er_vlans))) {
+		vlan = rb_entry(p, struct er_vlan, vl_node);
+		ipgre_er_vlan_destroy(ertunnel, vlan);
+	}
+}
+
+static void
+ipgre_er_routing(struct ip_tunnel *tunnel, struct sk_buff *skb)
+{
+	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
+	struct iphdr *iph = ip_hdr(skb);
+	struct er_sre *sre = (struct er_sre *)skb->data;
+	struct er_vlan *vlan;
+	__be32 daddr = iph->saddr;
+	char *haddr;
+	int len, vlid;
+
+	if (skb->len < sizeof(*sre))
+		return;
+	if (sre->sre_af != __constant_htons(ETH_P_TEB))
+		return;
+	len = ntohs(sre->sre_len);
+	if (skb->len != sizeof(*sre) + len);
+		return;
+	if (len < ETH_ALEN || len % ETH_ALEN)
+		return;
+
+	if (daddr == tunnel->parms.iph.saddr)
+		/* multicast loop */
+		return;
+
+	haddr = (char *)(sre + 1);
+	vlid = ipgre_er_vlid(haddr);
+
+	write_lock(&ipgre_lock);
+	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL)
+		vlan = ipgre_er_vlan_create(ertunnel, vlid);
+	if (IS_ERR(vlan)) {
+		write_unlock(&ipgre_lock);
+		return;
+	}
+
+	for (; len >= ETH_ALEN; len -= ETH_ALEN, haddr += ETH_ALEN) {
+		struct er_iface *iface;
+		int ifid;
+
+		ifid = ipgre_er_ifid(haddr);
+		if ((iface = ipgre_er_iface_lookup(&vlan->vl_dst, ifid))) {
+			iface->if_daddr = daddr;
+			continue;
+		}
+
+		if ((iface = ipgre_er_iface_create(&vlan->vl_dst,
+		    ifid)) == NULL) {
+			write_unlock(&ipgre_lock);
+			return;
+		}
+		iface->if_daddr = daddr;
+
+		vlan->vl_ndst++;
+	}
+	write_unlock(&ipgre_lock);
+}
+
+static void
+ipgre_er_rx(struct ip_tunnel *tunnel, struct sk_buff *skb)
+{
+	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
+	struct ethhdr *eh = eth_hdr(skb);
+	struct er_vlan *vlan;
+	struct er_iface *iface;
+	int vlid, ifid;
+
+	vlid = ipgre_er_vlid(eh->h_source);
+	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL)
+		goto drop;
+
+	if (is_multicast_ether_addr(eh->h_dest)) {
+		struct sk_buff *skb2;
+		struct rb_node *p;
+
+		skb->pkt_type = PACKET_BROADCAST;
+		for (p = rb_first(&vlan->vl_src); p; p = rb_next(p)) {
+			iface = rb_entry(p, struct er_iface, if_node);
+			if ((skb2 = skb_clone(skb, GFP_ATOMIC))) {
+				skb2->dev = iface->if_dev;
+				netif_rx(skb2);
+			}
+		}
+
+		goto drop;
+	}
+
+	if (ipgre_er_vlid(eh->h_dest) != vlid)
+		goto drop;
+
+	ifid = ipgre_er_ifid(eh->h_dest);
+	if ((iface = ipgre_er_iface_lookup(&vlan->vl_src, ifid)) == NULL)
+		goto drop;
+
+	skb->pkt_type = PACKET_HOST;
+	skb->dev = iface->if_dev;
+	netif_rx(skb);
+	return;
+
+drop:
+	kfree_skb(skb);
+}
+
+static __be32
+ipgre_er_dst(struct ip_tunnel *tunnel, struct sk_buff *skb)
+{
+	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
+	struct ethhdr *eh;
+	struct er_vlan *vlan;
+	struct er_iface *iface;
+	int vlid, ifid;
+
+	skb_reset_mac_header(skb);
+	eh = eth_hdr(skb);
+
+	vlid = ipgre_er_vlid(eh->h_source);
+	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL)
+		return 0;
+
+	if (is_multicast_ether_addr(eh->h_dest))
+		return ipgre_er_vtog(vlid);
+
+	if (ipgre_er_vlid(eh->h_dest) != vlid)
+		return 0;
+
+	ifid = ipgre_er_ifid(eh->h_dest);
+	if ((iface = ipgre_er_iface_lookup(&vlan->vl_dst, ifid)))
+		return iface->if_daddr;
+
+	return 0;
+}
+
+static int
+ipgre_er_iface_add_src(struct er_tunnel *ertunnel, struct net_device *dev)
+{
+	struct ip_tunnel *tunnel = IP_TUNNEL(ertunnel);
+	struct er_vlan *vlan;
+	struct er_iface *iface;
+	int vlid = ipgre_er_vlid(dev->dev_addr);
+	int ifid = ipgre_er_ifid(dev->dev_addr);
+
+	write_lock_bh(&ipgre_lock);
+	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL)
+		vlan = ipgre_er_vlan_create(ertunnel, vlid);
+	if (IS_ERR(vlan)) {
+		write_unlock_bh(&ipgre_lock);
+		return PTR_ERR(vlan);
+	}
+
+	if ((ipgre_er_iface_lookup(&vlan->vl_src, ifid))) {
+		write_unlock_bh(&ipgre_lock);
+		return -EEXIST;
+	}
+
+	if ((iface = ipgre_er_iface_create(&vlan->vl_src, ifid)) == NULL) {
+		write_unlock_bh(&ipgre_lock);
+		return -ENOMEM;
+	}
+	iface->if_dev = dev;
+
+	if (dev != tunnel->dev) {
+		iface->if_pack.type = __constant_htons(ETH_P_ALL);
+		iface->if_pack.dev = dev;
+		iface->if_pack.func = ipgre_er_packet;
+		iface->if_pack.af_packet_priv = tunnel;
+		dev_add_pack(&iface->if_pack);
+	}
+
+	vlan->vl_nsrc++;
+	ipgre_er_announce(ertunnel, vlan);
+	write_unlock_bh(&ipgre_lock);
+
+	return 0;
+}
+
+static void
+ipgre_er_iface_del_src(struct er_tunnel *ertunnel, struct net_device *dev)
+{
+	struct er_vlan *vlan;
+	struct er_iface *iface;
+	int vlid = ipgre_er_vlid(dev->dev_addr);
+	int ifid = ipgre_er_ifid(dev->dev_addr);
+
+	write_lock_bh(&ipgre_lock);
+	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL) {
+		write_unlock_bh(&ipgre_lock);
+		return;
+	}
+
+	if ((iface = ipgre_er_iface_lookup(&vlan->vl_src, ifid)) == NULL) {
+		write_unlock_bh(&ipgre_lock);
+		return;
+	}
+
+	ipgre_er_iface_destroy(&vlan->vl_src, iface);
+	vlan->vl_nsrc--;
+	if (vlan->vl_nsrc + vlan->vl_ndst == 0)
+		ipgre_er_vlan_destroy(ertunnel, vlan);
+	write_unlock_bh(&ipgre_lock);
+}
+
+static struct er_vlan *
+ipgre_er_vlan_lookup(struct er_tunnel *ertunnel, int id)
+{
+	struct rb_node *parent = ertunnel->er_vlans.rb_node;
+	struct er_vlan *vlan;
+
+	while (parent) {
+		vlan = rb_entry(parent, struct er_vlan, vl_node);
+		if (vlan->vl_id < id)
+			parent = parent->rb_left;
+		else if (vlan->vl_id > id)
+			parent = parent->rb_right;
+		else
+			return vlan;
+	}
+
+	return NULL;
+}
+
+static struct er_vlan *
+ipgre_er_vlan_create(struct er_tunnel *ertunnel, int id)
+{
+	struct er_vlan *vlan;
+	int error;
+
+	if ((vlan = kmalloc(sizeof(*vlan), GFP_KERNEL)) == NULL)
+		return ERR_PTR(-ENOMEM);
+	vlan->vl_id = id;
+	vlan->vl_src = RB_ROOT;
+	vlan->vl_nsrc = 0;
+	vlan->vl_dst = RB_ROOT;
+	vlan->vl_ndst = 0;
+
+	if ((error = ipgre_er_vlan_join(ertunnel, vlan))) {
+		kfree(vlan);
+		return ERR_PTR(error);
+	}
+
+	ipgre_er_vlan_insert(ertunnel, vlan);
+
+	return vlan;
+}
+
+static void
+ipgre_er_vlan_destroy(struct er_tunnel *ertunnel, struct er_vlan *vlan)
+{
+	struct er_iface *iface;
+	struct rb_node *p;
+
+	while ((p = rb_first(&vlan->vl_src))) {
+		iface = rb_entry(p, struct er_iface, if_node);
+		ipgre_er_iface_destroy(&vlan->vl_src, iface);
+	}
+	while ((p = rb_first(&vlan->vl_dst))) {
+		iface = rb_entry(p, struct er_iface, if_node);
+		ipgre_er_iface_destroy(&vlan->vl_dst, iface);
+	}
+
+	rb_erase(&vlan->vl_node, &ertunnel->er_vlans);
+	ipgre_er_vlan_leave(ertunnel, vlan);
+	kfree(vlan);
+}
+
+static void
+ipgre_er_vlan_insert(struct er_tunnel *ertunnel, struct er_vlan *new)
+{
+	struct rb_node *parent = NULL, **p = &ertunnel->er_vlans.rb_node;
+	struct er_vlan *vlan;
+
+	while (*p) {
+		parent = *p;
+		vlan = rb_entry(parent, struct er_vlan, vl_node);
+		if (vlan->vl_id < new->vl_id)
+			p = &parent->rb_left;
+		else if (vlan->vl_id > new->vl_id)
+			p = &parent->rb_right;
+	}
+	rb_link_node(&new->vl_node, parent, p);
+	rb_insert_color(&new->vl_node, &ertunnel->er_vlans);
+}
+
+static int
+ipgre_er_vlan_join(struct er_tunnel *ertunnel, struct er_vlan *vlan)
+{
+	struct ip_tunnel *t = IP_TUNNEL(ertunnel);
+	struct net_device *dev = t->dev;
+	__be32 daddr = ipgre_er_vtog(vlan->vl_id);
+	struct flowi fl = { .oif = t->parms.link,
+			    .nl_u = { .ip4_u =
+				      { .daddr = daddr,
+					.saddr = t->parms.iph.saddr,
+					.tos = RT_TOS(t->parms.iph.tos) } },
+			    .proto = IPPROTO_GRE };
+	struct rtable *rt;
+
+	if (ip_route_output_key(dev_net(dev), &rt, &fl))
+		return -EADDRNOTAVAIL;
+	dev = rt->u.dst.dev;
+	ip_rt_put(rt);
+	if (__in_dev_get_rtnl(dev) == NULL)
+		return -EADDRNOTAVAIL;
+	t->mlink = dev->ifindex;
+	ip_mc_inc_group(__in_dev_get_rtnl(dev), daddr);
+
+	return 0;
+}
+
+static void
+ipgre_er_vlan_leave(struct er_tunnel *ertunnel, struct er_vlan *vlan)
+{
+	struct ip_tunnel *t = IP_TUNNEL(ertunnel);
+	struct net_device *dev = t->dev;
+	__be32 daddr = ipgre_er_vtog(vlan->vl_id);
+	struct in_device *in_dev;
+
+	if ((in_dev = inetdev_by_index(dev_net(dev), t->mlink))) {
+		ip_mc_dec_group(in_dev, daddr);
+		in_dev_put(in_dev);
+	}
+}
+
+static struct er_iface *
+ipgre_er_iface_lookup(struct rb_root *root, int id)
+{
+	struct rb_node *parent = root->rb_node;
+	struct er_iface *iface;
+
+	while (parent) {
+		iface = rb_entry(parent, struct er_iface, if_node);
+		if (iface->if_id < id)
+			parent = parent->rb_left;
+		else if (iface->if_id > id)
+			parent = parent->rb_right;
+		else
+			return iface;
+	}
+
+	return NULL;
+}
+
+static struct er_iface *
+ipgre_er_iface_create(struct rb_root *root, int id)
+{
+	struct er_iface *iface;
+
+	if ((iface = kzalloc(sizeof(*iface), GFP_KERNEL)) == NULL)
+		return ERR_PTR(-ENOMEM);
+	iface->if_id = id;
+
+	ipgre_er_iface_insert(root, iface);
+
+	return iface;
+}
+
+static void
+ipgre_er_iface_destroy(struct rb_root *root, struct er_iface *iface)
+{
+	if (iface->if_pack.dev)
+		dev_remove_pack(&iface->if_pack);
+	rb_erase(&iface->if_node, root);
+	kfree(iface);
+}
+
+static void
+ipgre_er_iface_insert(struct rb_root *root, struct er_iface *new)
+{
+	struct rb_node *parent = NULL, **p = &root->rb_node;
+	struct er_iface *iface;
+
+	while (*p) {
+		parent = *p;
+		iface = rb_entry(parent, struct er_iface, if_node);
+		if (iface->if_id < new->if_id)
+			p = &parent->rb_left;
+		else if (iface->if_id > new->if_id)
+			p = &parent->rb_right;
+	}
+	rb_link_node(&new->if_node, parent, p);
+	rb_insert_color(&new->if_node, root);
+}
+
+static void
+ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
+{
+	struct ip_tunnel *tunnel = IP_TUNNEL(ertunnel);
+	__be32 daddr = ipgre_er_vtog(vlan->vl_id);
+	struct flowi fl = { .oif = tunnel->parms.link,
+			    .nl_u = { .ip4_u =
+				      { .daddr = daddr,
+					.saddr = tunnel->parms.iph.saddr } },
+			    .proto = IPPROTO_GRE };
+	struct rtable *rt;
+	struct net_device *dev;
+	struct sk_buff *skb;
+	struct iphdr  *iph;
+	struct er_sre *sre;
+	char *addr;
+	struct rb_node *p;
+	int gre_flags, gre_hlen, sre_len;
+
+	if (ip_route_output_key(dev_net(tunnel->dev), &rt, &fl))
+		return;
+	dev = rt->u.dst.dev;
+
+	gre_flags = tunnel->parms.o_flags | GRE_ROUTING;
+	gre_hlen = tunnel->hlen;
+	if (!(gre_flags & GRE_CSUM)) {
+		gre_flags |= GRE_CSUM;
+		gre_hlen += 4;
+	}
+	sre_len = sizeof(struct er_sre) + vlan->vl_nsrc * ETH_ALEN;
+	if ((skb = alloc_skb(gre_hlen + sre_len + LL_ALLOCATED_SPACE(dev),
+	    GFP_ATOMIC)) == NULL) {
+		ip_rt_put(rt);
+		return;
+	}
+
+	skb->dst = &rt->u.dst;
+
+	skb_reserve(skb, LL_RESERVED_SPACE(dev));
+
+	skb_reset_network_header(skb);
+	iph = ip_hdr(skb);
+	skb_put(skb, gre_hlen);
+
+	iph->version = 4;
+	iph->ihl = sizeof(struct iphdr) >> 2;
+	iph->tos = 0;
+	iph->frag_off = __constant_htons(IP_DF);
+	iph->ttl = 1;
+	iph->daddr = rt->rt_dst;
+	iph->saddr = rt->rt_src;
+	iph->protocol = IPPROTO_GRE;
+	ip_select_ident(iph, &rt->u.dst, NULL);
+
+	sre = (struct er_sre *)skb_put(skb, sre_len);
+	sre->sre_af = __constant_htons(ETH_P_TEB);
+	sre->sre_len = htons(vlan->vl_nsrc * ETH_ALEN);
+	addr = (char *)(sre + 1);
+	for (p = rb_first(&vlan->vl_src); p; p = rb_next(p)) {
+		struct er_iface *iface;
+
+		iface = rb_entry(p, struct er_iface, if_node);
+		memcpy(addr, iface->if_dev->dev_addr, ETH_ALEN);
+		addr += 6;
+	}
+
+	((__be16 *)(iph + 1))[0] = gre_flags;
+	((__be16 *)(iph + 1))[1] = __constant_htons(ETH_P_TEB);
+
+	if (gre_flags & (GRE_KEY | GRE_CSUM | GRE_SEQ)) {
+		__be32 *ptr = (__be32 *)(((u8 *)iph) + gre_hlen - 4);
+
+		if (gre_flags & GRE_SEQ) {
+			++tunnel->o_seqno;
+			*ptr = htonl(tunnel->o_seqno);
+			ptr--;
+		}
+		if (gre_flags & GRE_KEY) {
+			*ptr = tunnel->parms.o_key;
+			ptr--;
+		}
+		if (gre_flags & GRE_CSUM) {
+			*ptr = 0;
+			*(__sum16 *)ptr = ip_compute_csum((void *)(iph + 1),
+			    skb->len - sizeof(struct iphdr));
+		}
+	}
+
+	ip_local_out(skb);
+}
+
+static void
+ipgre_er_timer(unsigned long data)
+{
+	struct er_tunnel *ertunnel = (struct er_tunnel *)data;
+	struct ip_tunnel *tunnel = IP_TUNNEL(ertunnel);
+	struct er_vlan *vlan;
+	struct rb_node *p;
+
+	if (!(tunnel->dev->flags & IFF_UP))
+		goto done;
+
+	read_lock(&ipgre_lock);
+	for (p = rb_first(&ertunnel->er_vlans); p; p = rb_next(p)) {
+		vlan = rb_entry(p, struct er_vlan, vl_node);
+		ipgre_er_announce(ertunnel, vlan);
+	}
+	read_unlock(&ipgre_lock);
+
+done:
+	mod_timer(&ertunnel->er_timer, jiffies + ER_ANNOUNCE_TIME);
+}
+
+static int
+ipgre_er_mac_addr(struct net_device *dev, void *p)
+{
+	struct ip_tunnel *tunnel = netdev_priv(dev);
+	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
+	struct sockaddr *addr = p;
+
+	if (netif_running(dev))
+		return -EBUSY;
+	if (!is_valid_ether_addr(addr->sa_data))
+		return -EADDRNOTAVAIL;
+
+	ipgre_er_iface_del_src(ertunnel, dev);
+	memcpy(dev->dev_addr, addr->sa_data, ETH_ALEN);
+	return ipgre_er_iface_add_src(ertunnel, dev);
+}
+
+static int
+ipgre_er_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+{
+	struct ip_tunnel *tunnel = netdev_priv(dev);
+	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
+
+	switch (cmd) {
+	case SIOCBRADDIF:
+	case SIOCBRDELIF:
+		return ipgre_er_brctl(ertunnel, ifr->ifr_ifindex,
+		    cmd == SIOCBRADDIF);
+	}
+
+	return -EOPNOTSUPP;
+}
+
+static int
+ipgre_er_brctl(struct er_tunnel *ertunnel, int ifindex, int isadd)
+{
+	struct net_device *dev;
+	int ret = 0;
+
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
+	dev = dev_get_by_index(&init_net, ifindex);
+	if (dev == NULL)
+		return -EINVAL;
+
+	if (isadd)
+		ret = ipgre_er_iface_add_src(ertunnel, dev);
+	else
+		ipgre_er_iface_del_src(ertunnel, dev);
+
+	dev_put(dev);
+	return ret;
+}
+
+static int
+ipgre_er_packet(struct sk_buff *skb, struct net_device *dev,
+    struct packet_type *pack, struct net_device *orig_dev)
+{
+	struct ip_tunnel *tunnel = pack->af_packet_priv;
+
+	return ipgre_tunnel_xmit(skb, tunnel->dev);
+}
 
 /*
  *	And now the modules code and kernel interface.
