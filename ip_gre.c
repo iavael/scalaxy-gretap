@@ -2282,7 +2282,8 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 	iph->ihl = sizeof(struct iphdr) >> 2;
 	iph->tos = 0;
 	iph->frag_off = __constant_htons(IP_DF);
-	iph->ttl = 1;
+	if ((iph->ttl = tunnel->parms.iph.ttl) == 0)
+		iph->ttl = 1;
 	iph->daddr = rt->rt_dst;
 	iph->saddr = rt->rt_src;
 	iph->protocol = IPPROTO_GRE;
