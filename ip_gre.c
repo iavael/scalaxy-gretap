@@ -2443,6 +2443,14 @@ ipgre_er_packet(struct sk_buff *skb, struct net_device *dev,
     struct packet_type *pack, struct net_device *orig_dev)
 {
 	struct ip_tunnel *tunnel = pack->af_packet_priv;
+	struct ethhdr *eh;
+
+	skb_reset_mac_header(skb);
+	eh = eth_hdr(skb);
+	if (ipgre_er_vlid(eh->h_source) != ipgre_er_vlid(dev->dev_addr)) {
+		kfree_skb(skb);
+		return 0;
+	}
 
 	return ipgre_tunnel_xmit(skb, tunnel->dev);
 }
