@@ -1755,7 +1755,6 @@ struct er_vlan {
 	struct rb_root		vl_src;
 	int			vl_nsrc;
 	struct rb_root		vl_dst;
-	int			vl_ndst;
 };
 
 struct er_iface {
@@ -1926,8 +1925,6 @@ ipgre_er_routing(struct ip_tunnel *tunnel, struct sk_buff *skb)
 		}
 		iface->if_daddr = daddr;
 		iface->if_expire = jiffies + ER_EXPIRE_TIME;
-
-		vlan->vl_ndst++;
 	}
 	write_unlock(&ipgre_lock);
 }
@@ -2070,8 +2067,7 @@ ipgre_er_iface_del_src(struct er_tunnel *ertunnel, struct net_device *dev)
 	}
 
 	ipgre_er_iface_destroy(&vlan->vl_src, iface);
-	vlan->vl_nsrc--;
-	if (vlan->vl_nsrc + vlan->vl_ndst == 0)
+	if (--vlan->vl_nsrc == 0)
 		ipgre_er_vlan_destroy(ertunnel, vlan);
 	write_unlock_bh(&ipgre_lock);
 }
@@ -2360,22 +2356,15 @@ ipgre_er_timer(unsigned long data)
 		goto done;
 
 	write_lock(&ipgre_lock);
-	for (p = rb_first(&ertunnel->er_vlans); p;) {
+	for (p = rb_first(&ertunnel->er_vlans); p; p = rb_next(p)) {
 		vlan = rb_entry(p, struct er_vlan, vl_node);
 		ipgre_er_announce(ertunnel, vlan);
 
 		for (pp = rb_first(&vlan->vl_dst); pp; pp = rb_next(pp)) {
 			iface = rb_entry(pp, struct er_iface, if_node);
-			if (time_after(jiffies, iface->if_expire)) {
+			if (time_after(jiffies, iface->if_expire))
 				ipgre_er_iface_destroy(&vlan->vl_dst, iface);
-				vlan->vl_ndst--;
-			}
 		}
-
-		p = rb_next(p);
-
-		if (vlan->vl_nsrc + vlan->vl_ndst == 0)
-			ipgre_er_vlan_destroy(ertunnel, vlan);
 	}
 	write_unlock(&ipgre_lock);
 
@@ -2476,8 +2465,7 @@ ipgre_er_show(struct device *d, struct device_attribute *attr, char *buf)
 			count += sprintf(buf + count, " %s",
 			    iface->if_dev->name);
 		}
-		if (vlan->vl_nsrc)
-			count += sprintf(buf + count, "\n");
+		count += sprintf(buf + count, "\n");
 
 		for (pp = rb_first(&vlan->vl_dst); pp; pp = rb_next(pp)) {
 			unsigned char *a;
