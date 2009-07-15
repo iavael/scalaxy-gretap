@@ -2079,13 +2079,11 @@ ipgre_er_vlan_create(struct er_tunnel *ertunnel, int id)
 	struct er_vlan *vlan;
 	int error;
 
-	if ((vlan = kmalloc(sizeof(*vlan), GFP_KERNEL)) == NULL)
+	if ((vlan = kzalloc(sizeof(*vlan), GFP_KERNEL)) == NULL)
 		return ERR_PTR(-ENOMEM);
 	vlan->vl_id = id;
 	vlan->vl_src = RB_ROOT;
-	vlan->vl_nsrc = 0;
 	vlan->vl_dst = RB_ROOT;
-	vlan->vl_ndst = 0;
 
 	if ((error = ipgre_er_vlan_join(ertunnel, vlan))) {
 		kfree(vlan);
