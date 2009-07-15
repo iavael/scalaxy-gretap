@@ -1897,8 +1897,8 @@ ipgre_er_routing(struct ip_tunnel *tunnel, struct sk_buff *skb)
 			continue;
 		}
 
-		if ((iface = ipgre_er_iface_create(&vlan->vl_dst,
-		    ifid)) == NULL) {
+		iface = ipgre_er_iface_create(&vlan->vl_dst, ifid);
+		if (IS_ERR(iface)) {
 			write_unlock(&ipgre_lock);
 			return;
 		}
@@ -2006,9 +2006,10 @@ ipgre_er_iface_add_src(struct er_tunnel *ertunnel, struct net_device *dev)
 		return -EEXIST;
 	}
 
-	if ((iface = ipgre_er_iface_create(&vlan->vl_src, ifid)) == NULL) {
+	iface = ipgre_er_iface_create(&vlan->vl_src, ifid);
+	if (IS_ERR(iface)) {
 		write_unlock_bh(&ipgre_lock);
-		return -ENOMEM;
+		return PTR_ERR(iface);
 	}
 	iface->if_dev = dev;
 
