@@ -162,6 +162,7 @@ struct er_tunnel {
 };
 
 static int ipgre_er_init(struct ip_tunnel *);
+static int ipgre_er_postinit(struct ip_tunnel *);
 static void ipgre_er_uninit(struct ip_tunnel *);
 
 static void ipgre_er_routing(struct ip_tunnel *, struct sk_buff *);
@@ -1585,6 +1586,9 @@ static int ipgre_newlink(struct net_device *dev, struct nlattr *tb[],
 	dev_hold(dev);
 	ipgre_tunnel_link(ign, nt);
 
+	if (IPGRE_ISER(nt))
+		ipgre_er_postinit(nt);
+
 out:
 	return err;
 }
@@ -1792,6 +1796,14 @@ static int ipgre_er_brctl(struct er_tunnel *, int, int);
 static int  ipgre_er_packet(struct sk_buff *, struct net_device *,
     struct packet_type *, struct net_device *);
 
+static ssize_t ipgre_er_show(struct device *, struct device_attribute *,
+    char *);
+
+static const struct device_attribute ipgre_er_attr = {
+	.attr = { .name = "etherelay", .mode = 0444, .owner = THIS_MODULE },
+	.show = ipgre_er_show
+};
+
 static inline int
 ipgre_er_vlid(unsigned char *addr)
 {
@@ -1835,12 +1847,22 @@ ipgre_er_init(struct ip_tunnel *tunnel)
 	return 0;
 }
 
+static int
+ipgre_er_postinit(struct ip_tunnel *tunnel)
+{
+	struct net_device *dev = tunnel->dev;
+
+	return sysfs_create_file(&dev->dev.kobj, &ipgre_er_attr.attr);
+}
+
 static void
 ipgre_er_uninit(struct ip_tunnel *tunnel)
 {
 	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
 	struct er_vlan *vlan;
 	struct rb_node *p;
+
+	sysfs_remove_file(&tunnel->dev->dev.kobj, &ipgre_er_attr.attr);
 
 	del_timer(&ertunnel->er_timer);
 
@@ -2423,6 +2445,45 @@ ipgre_er_packet(struct sk_buff *skb, struct net_device *dev,
 	struct ip_tunnel *tunnel = pack->af_packet_priv;
 
 	return ipgre_tunnel_xmit(skb, tunnel->dev);
+}
+
+static ssize_t
+ipgre_er_show(struct device *d, struct device_attribute *attr, char *buf)
+{
+	struct net_device *dev = container_of(d, struct net_device, dev);
+	struct ip_tunnel *tunnel = netdev_priv(dev);
+	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
+	struct er_vlan *vlan;
+	struct er_iface *iface;
+	struct rb_node *p, *pp;
+	ssize_t count = 0;
+
+	read_lock_bh(&ipgre_lock);
+	for (p = rb_first(&ertunnel->er_vlans); p; p = rb_next(p)) {
+		vlan = rb_entry(p, struct er_vlan, vl_node);
+		count += sprintf(buf + count, "vlan %d\n", vlan->vl_id);
+
+		for (pp = rb_first(&vlan->vl_src); pp; pp = rb_next(pp)) {
+			iface = rb_entry(pp, struct er_iface, if_node);
+			count += sprintf(buf + count, " %s",
+			    iface->if_dev->name);
+		}
+		if (vlan->vl_nsrc)
+			count += sprintf(buf + count, "\n");
+
+		for (pp = rb_first(&vlan->vl_dst); pp; pp = rb_next(pp)) {
+			unsigned char *a;
+
+			iface = rb_entry(pp, struct er_iface, if_node);
+			a = (unsigned char *)&iface->if_daddr;
+			count += sprintf(buf + count, " %d %d.%d.%d.%d\n",
+			    iface->if_id, a[0], a[1], a[2], a[3]);
+		}
+
+	}
+	read_unlock_bh(&ipgre_lock);
+
+	return count;
 }
 
 /*
