@@ -1900,9 +1900,7 @@ ipgre_er_routing(struct ip_tunnel *tunnel, struct sk_buff *skb)
 	vlid = ipgre_er_vlid(haddr);
 
 	write_lock(&ipgre_lock);
-	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL)
-		vlan = ipgre_er_vlan_create(ertunnel, vlid);
-	if (IS_ERR(vlan)) {
+	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL) {
 		write_unlock(&ipgre_lock);
 		return;
 	}
