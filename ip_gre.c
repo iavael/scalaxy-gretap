@@ -814,9 +814,11 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			goto tx_error;
 	}
 
-	if (IPGRE_ISER(tunnel))
+	if (IPGRE_ISER(tunnel)) {
+		skb_reset_mac_header(skb);
 		if ((dst = ipgre_er_dst(tunnel, skb)) == 0)
 			goto tx_error;
+	}
 
 	tos = tiph->tos;
 	if (tos&1) {
@@ -1976,13 +1978,10 @@ static __be32
 ipgre_er_dst(struct ip_tunnel *tunnel, struct sk_buff *skb)
 {
 	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
-	struct ethhdr *eh;
+	struct ethhdr *eh = eth_hdr(skb);
 	struct er_vlan *vlan;
 	struct er_iface *iface;
 	int vlid, ifid;
-
-	skb_reset_mac_header(skb);
-	eh = eth_hdr(skb);
 
 	vlid = ipgre_er_vlid(eh->h_source);
 	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL)
@@ -2432,7 +2431,9 @@ ipgre_er_packet(struct sk_buff *skb, struct net_device *dev,
 	struct ip_tunnel *tunnel = pack->af_packet_priv;
 	struct ethhdr *eh;
 
-	skb_reset_mac_header(skb);
+	if (skb->pkt_type != PACKET_OUTGOING)
+		skb_push(skb, sizeof(*eh));
+
 	eh = eth_hdr(skb);
 	if (ipgre_er_vlid(eh->h_source) != ipgre_er_vlid(dev->dev_addr)) {
 		kfree_skb(skb);
