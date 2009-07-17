@@ -32,6 +32,7 @@
 #include <linux/version.h>
 #include <linux/rbtree.h>
 #include <linux/timer.h>
+#include <linux/mutex.h>
 
 #include <net/sock.h>
 #include <net/ip.h>
@@ -213,6 +214,7 @@ struct ipgre_net {
 #define tunnels_wc	tunnels[0]
 
 static DEFINE_RWLOCK(ipgre_lock);
+static DEFINE_MUTEX(ipgre_mtx);
 
 /* Given src, dst and key, find appropriate for input tunnel. */
 
@@ -2019,22 +2021,22 @@ ipgre_er_iface_add_src(struct er_tunnel *ertunnel, struct net_device *dev)
 	int vlid = ipgre_er_vlid(dev->dev_addr);
 	int ifid = ipgre_er_ifid(dev->dev_addr);
 
-	write_lock_bh(&ipgre_lock);
+	mutex_lock(&ipgre_mtx);
 	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL)
 		vlan = ipgre_er_vlan_create(ertunnel, vlid);
 	if (IS_ERR(vlan)) {
-		write_unlock_bh(&ipgre_lock);
+		mutex_unlock(&ipgre_mtx);
 		return PTR_ERR(vlan);
 	}
 
 	if ((ipgre_er_iface_lookup(&vlan->vl_src, ifid))) {
-		write_unlock_bh(&ipgre_lock);
+		mutex_unlock(&ipgre_mtx);
 		return -EEXIST;
 	}
 
 	iface = ipgre_er_iface_create(&vlan->vl_src, ifid);
 	if (IS_ERR(iface)) {
-		write_unlock_bh(&ipgre_lock);
+		mutex_unlock(&ipgre_mtx);
 		return PTR_ERR(iface);
 	}
 	iface->if_dev = dev;
@@ -2049,7 +2051,7 @@ ipgre_er_iface_add_src(struct er_tunnel *ertunnel, struct net_device *dev)
 
 	vlan->vl_nsrc++;
 	ipgre_er_announce(ertunnel, vlan);
-	write_unlock_bh(&ipgre_lock);
+	mutex_unlock(&ipgre_mtx);
 
 	return 0;
 }
@@ -2062,21 +2064,21 @@ ipgre_er_iface_del_src(struct er_tunnel *ertunnel, struct net_device *dev)
 	int vlid = ipgre_er_vlid(dev->dev_addr);
 	int ifid = ipgre_er_ifid(dev->dev_addr);
 
-	write_lock_bh(&ipgre_lock);
+	mutex_lock(&ipgre_mtx);
 	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL) {
-		write_unlock_bh(&ipgre_lock);
+		mutex_unlock(&ipgre_mtx);
 		return;
 	}
 
 	if ((iface = ipgre_er_iface_lookup(&vlan->vl_src, ifid)) == NULL) {
-		write_unlock_bh(&ipgre_lock);
+		mutex_unlock(&ipgre_mtx);
 		return;
 	}
 
 	ipgre_er_iface_destroy(&vlan->vl_src, iface);
 	if (--vlan->vl_nsrc == 0)
 		ipgre_er_vlan_destroy(ertunnel, vlan);
-	write_unlock_bh(&ipgre_lock);
+	mutex_unlock(&ipgre_mtx);
 }
 
 static struct er_vlan *
