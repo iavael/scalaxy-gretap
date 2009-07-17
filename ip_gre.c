@@ -2432,7 +2432,7 @@ ipgre_er_packet(struct sk_buff *skb, struct net_device *dev,
 	struct ethhdr *eh;
 
 	if (skb->pkt_type != PACKET_OUTGOING)
-		skb_push(skb, sizeof(*eh));
+		skb_push(skb, ETH_HLEN);
 
 	eh = eth_hdr(skb);
 	if (ipgre_er_vlid(eh->h_source) != ipgre_er_vlid(dev->dev_addr)) {
