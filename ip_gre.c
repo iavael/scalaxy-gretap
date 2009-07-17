@@ -1951,7 +1951,12 @@ ipgre_er_rx(struct ip_tunnel *tunnel, struct sk_buff *skb)
 			iface = rb_entry(p, struct er_iface, if_node);
 			if ((skb2 = skb_clone(skb, GFP_ATOMIC))) {
 				skb2->dev = iface->if_dev;
-				netif_rx(skb2);
+				if (skb2->dev == tunnel->dev) {
+					netif_rx(skb2);
+				} else {
+					skb_push(skb2, ETH_HLEN);
+					dev_queue_xmit(skb2);
+				}
 			}
 		}
 
@@ -1967,7 +1972,12 @@ ipgre_er_rx(struct ip_tunnel *tunnel, struct sk_buff *skb)
 
 	skb->pkt_type = PACKET_HOST;
 	skb->dev = iface->if_dev;
-	netif_rx(skb);
+	if (skb->dev == tunnel->dev) {
+		netif_rx(skb);
+	} else {
+		skb_push(skb, ETH_HLEN);
+		dev_queue_xmit(skb);
+	}
 	return;
 
 drop:
