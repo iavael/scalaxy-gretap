@@ -167,7 +167,7 @@ static int ipgre_er_postinit(struct ip_tunnel *);
 static void ipgre_er_uninit(struct ip_tunnel *);
 
 static void ipgre_er_routing(struct ip_tunnel *, struct sk_buff *);
-static void ipgre_er_rx(struct ip_tunnel *, struct sk_buff *);
+static void ipgre_er_xmit(struct ip_tunnel *, struct sk_buff *);
 static __be32 ipgre_er_dst(struct ip_tunnel *, struct sk_buff *);
 
 static struct rtnl_link_ops ipgre_link_ops __read_mostly;
@@ -729,9 +729,8 @@ static int ipgre_rcv(struct sk_buff *skb)
 		ipgre_ecn_decapsulate(iph, skb);
 
 		if (IPGRE_ISER(tunnel))
-			ipgre_er_rx(tunnel, skb);
-		else
-			netif_rx(skb);
+			ipgre_er_xmit(tunnel, skb);
+		netif_rx(skb);
 		read_unlock(&ipgre_lock);
 		return(0);
 	}
@@ -1932,58 +1931,48 @@ ipgre_er_routing(struct ip_tunnel *tunnel, struct sk_buff *skb)
 }
 
 static void
-ipgre_er_rx(struct ip_tunnel *tunnel, struct sk_buff *skb)
+ipgre_er_xmit(struct ip_tunnel *tunnel, struct sk_buff *skb)
 {
 	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
 	struct ethhdr *eh = eth_hdr(skb);
+	struct sk_buff *skb2;
 	struct er_vlan *vlan;
 	struct er_iface *iface;
 	int vlid, ifid;
 
 	vlid = ipgre_er_vlid(eh->h_source);
 	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL)
-		goto drop;
+		return;
 
 	if (is_multicast_ether_addr(eh->h_dest)) {
-		struct sk_buff *skb2;
 		struct rb_node *p;
 
-		skb->pkt_type = PACKET_BROADCAST;
 		for (p = rb_first(&vlan->vl_src); p; p = rb_next(p)) {
 			iface = rb_entry(p, struct er_iface, if_node);
+			if (iface->if_dev == tunnel->dev)
+				continue;
 			if ((skb2 = skb_clone(skb, GFP_ATOMIC))) {
 				skb2->dev = iface->if_dev;
-				if (skb2->dev == tunnel->dev) {
-					netif_rx(skb2);
-				} else {
-					skb_push(skb2, ETH_HLEN);
-					dev_queue_xmit(skb2);
-				}
+				skb_push(skb2, ETH_HLEN);
+				dev_queue_xmit(skb2);
 			}
 		}
-
-		goto drop;
+		return;
 	}
 
 	if (ipgre_er_vlid(eh->h_dest) != vlid)
-		goto drop;
+		return;
 
 	ifid = ipgre_er_ifid(eh->h_dest);
-	if ((iface = ipgre_er_iface_lookup(&vlan->vl_src, ifid)) == NULL)
-		goto drop;
+	if ((iface = ipgre_er_iface_lookup(&vlan->vl_src, ifid)) == NULL ||
+	    iface->if_dev == tunnel->dev)
+		return;
 
-	skb->pkt_type = PACKET_HOST;
-	skb->dev = iface->if_dev;
-	if (skb->dev == tunnel->dev) {
-		netif_rx(skb);
-	} else {
-		skb_push(skb, ETH_HLEN);
-		dev_queue_xmit(skb);
+	if ((skb2 = skb_clone(skb, GFP_ATOMIC))) {
+		skb2->dev = iface->if_dev;
+		skb_push(skb2, ETH_HLEN);
+		dev_queue_xmit(skb2);
 	}
-	return;
-
-drop:
-	kfree_skb(skb);
 }
 
 static __be32
@@ -2443,16 +2432,20 @@ ipgre_er_packet(struct sk_buff *skb, struct net_device *dev,
 	struct ip_tunnel *tunnel = pack->af_packet_priv;
 	struct ethhdr *eh;
 
-	if (skb->pkt_type != PACKET_OUTGOING)
-		skb_push(skb, ETH_HLEN);
+	if (skb->pkt_type == PACKET_OUTGOING)
+		goto drop;
 
+	skb_push(skb, ETH_HLEN);
 	eh = eth_hdr(skb);
-	if (ipgre_er_vlid(eh->h_source) != ipgre_er_vlid(dev->dev_addr)) {
-		kfree_skb(skb);
-		return 0;
-	}
+
+	if (ipgre_er_vlid(eh->h_source) != ipgre_er_vlid(dev->dev_addr))
+		goto drop;
 
 	return ipgre_tunnel_xmit(skb, tunnel->dev);
+
+drop:
+	kfree_skb(skb);
+	return NET_RX_DROP;
 }
 
 static ssize_t
