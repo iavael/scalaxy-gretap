@@ -2441,7 +2441,8 @@ ipgre_er_packet(struct sk_buff *skb, struct net_device *dev,
 	if (ipgre_er_vlid(eh->h_source) != ipgre_er_vlid(dev->dev_addr))
 		goto drop;
 
-	return ipgre_tunnel_xmit(skb, tunnel->dev);
+	skb->dev = tunnel->dev;
+	return dev_queue_xmit(skb);
 
 drop:
 	kfree_skb(skb);
