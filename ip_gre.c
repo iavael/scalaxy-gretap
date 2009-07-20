@@ -1795,7 +1795,7 @@ static void ipgre_er_timer(unsigned long);
 static int ipgre_er_mac_addr(struct net_device *, void *);
 static int ipgre_er_ioctl(struct net_device *, struct ifreq *, int);
 static int ipgre_er_brctl(struct er_tunnel *, int, int);
-static int  ipgre_er_packet(struct sk_buff *, struct net_device *,
+static int ipgre_er_rcv(struct sk_buff *, struct net_device *,
     struct packet_type *, struct net_device *);
 
 static ssize_t ipgre_er_show(struct device *, struct device_attribute *,
@@ -2033,7 +2033,7 @@ ipgre_er_iface_add_src(struct er_tunnel *ertunnel, struct net_device *dev)
 	if (dev != tunnel->dev) {
 		iface->if_pack.type = __constant_htons(ETH_P_ALL);
 		iface->if_pack.dev = dev;
-		iface->if_pack.func = ipgre_er_packet;
+		iface->if_pack.func = ipgre_er_rcv;
 		iface->if_pack.af_packet_priv = tunnel;
 		dev_add_pack(&iface->if_pack);
 	}
@@ -2426,7 +2426,7 @@ ipgre_er_brctl(struct er_tunnel *ertunnel, int ifindex, int isadd)
 }
 
 static int
-ipgre_er_packet(struct sk_buff *skb, struct net_device *dev,
+ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
     struct packet_type *pack, struct net_device *orig_dev)
 {
 	struct ip_tunnel *tunnel = pack->af_packet_priv;
