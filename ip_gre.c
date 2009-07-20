@@ -2435,6 +2435,9 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (skb->pkt_type == PACKET_OUTGOING)
 		goto drop;
 
+	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL)
+		goto drop;
+
 	skb_push(skb, ETH_HLEN);
 	eh = eth_hdr(skb);
 
