@@ -1753,6 +1753,7 @@ static struct rtnl_link_ops ipgre_tap_ops __read_mostly = {
 #define ER_EXPIRE_TIME		(5 * ER_ANNOUNCE_TIME)
 
 struct er_vlan {
+	struct er_tunnel *	vl_tun;
 	struct rb_node		vl_node;
 	int			vl_id;
 	struct rb_root		vl_src;
@@ -2034,7 +2035,7 @@ ipgre_er_iface_add_src(struct er_tunnel *ertunnel, struct net_device *dev)
 		iface->if_pack.type = __constant_htons(ETH_P_ALL);
 		iface->if_pack.dev = dev;
 		iface->if_pack.func = ipgre_er_rcv;
-		iface->if_pack.af_packet_priv = tunnel;
+		iface->if_pack.af_packet_priv = vlan;
 		dev_add_pack(&iface->if_pack);
 	}
 
@@ -2097,6 +2098,7 @@ ipgre_er_vlan_create(struct er_tunnel *ertunnel, int id)
 
 	if ((vlan = kzalloc(sizeof(*vlan), GFP_KERNEL)) == NULL)
 		return ERR_PTR(-ENOMEM);
+	vlan->vl_tun = ertunnel;
 	vlan->vl_id = id;
 	vlan->vl_src = RB_ROOT;
 	vlan->vl_dst = RB_ROOT;
@@ -2429,7 +2431,10 @@ static int
 ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
     struct packet_type *pack, struct net_device *orig_dev)
 {
-	struct ip_tunnel *tunnel = pack->af_packet_priv;
+	struct er_vlan *vlan = pack->af_packet_priv;
+	struct er_tunnel *ertunnel = vlan->vl_tun;
+	struct ip_tunnel *tunnel = IP_TUNNEL(ertunnel);
+	struct er_iface *iface;
 	struct ethhdr *eh;
 
 	if (skb->pkt_type == PACKET_OUTGOING)
@@ -2441,11 +2446,40 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 	skb_push(skb, ETH_HLEN);
 	eh = eth_hdr(skb);
 
-	if (ipgre_er_vlid(eh->h_source) != ipgre_er_vlid(dev->dev_addr))
+	if (ipgre_er_vlid(eh->h_source) != vlan->vl_id)
 		goto drop;
 
-	skb->dev = tunnel->dev;
-	return dev_queue_xmit(skb);
+	if (is_multicast_ether_addr(eh->h_dest)) {
+		struct rb_node *p;
+		struct sk_buff *skb2;
+
+		for (p = rb_first(&vlan->vl_src); p; p = rb_next(p)) {
+			iface = rb_entry(p, struct er_iface, if_node);
+			if (iface->if_dev == dev ||
+			    iface->if_dev == tunnel->dev)
+				continue;
+			if ((skb2 = skb_clone(skb, GFP_ATOMIC))) {
+				skb2->dev = iface->if_dev;
+				dev_queue_xmit(skb2);
+			}
+		}
+
+		skb->dev = tunnel->dev;
+		dev_queue_xmit(skb);
+		return 0;
+	}
+
+	if ((iface = ipgre_er_iface_lookup(&vlan->vl_src,
+	    ipgre_er_ifid(eh->h_dest)))) {
+		if (iface->if_dev == dev)
+			goto drop;
+		skb->dev = iface->if_dev;
+	} else {
+		skb->dev = tunnel->dev;
+	}
+
+	dev_queue_xmit(skb);
+	return 0;
 
 drop:
 	kfree_skb(skb);
