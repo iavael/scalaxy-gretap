@@ -157,9 +157,12 @@ enum
 #define IPGRE_ISER(tunnel)	((tunnel)->dev->type == ARPHRD_ETHER && \
 				ipv4_is_multicast((tunnel)->parms.iph.daddr))
 
+struct er_vlan;
+
 struct er_tunnel {
 	struct rb_root		er_vlans;
 	struct timer_list	er_timer;
+	struct er_vlan *	er_defvlan;
 };
 
 static int ipgre_er_init(struct ip_tunnel *);
@@ -1986,8 +1989,10 @@ ipgre_er_dst(struct ip_tunnel *tunnel, struct sk_buff *skb)
 	int vlid, ifid;
 
 	vlid = ipgre_er_vlid(eh->h_source);
-	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL)
-		return 0;
+	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL) {
+		vlan = ertunnel->er_defvlan;
+		vlid = vlan->vl_id;
+	}
 
 	if (is_multicast_ether_addr(eh->h_dest))
 		return ipgre_er_vtog(vlid);
@@ -2018,6 +2023,9 @@ ipgre_er_iface_add_src(struct er_tunnel *ertunnel, struct net_device *dev)
 		mutex_unlock(&ipgre_mtx);
 		return PTR_ERR(vlan);
 	}
+
+	if (dev == tunnel->dev)
+		ertunnel->er_defvlan = vlan;
 
 	if ((ipgre_er_iface_lookup(&vlan->vl_src, ifid))) {
 		mutex_unlock(&ipgre_mtx);
