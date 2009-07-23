@@ -170,7 +170,7 @@ static int ipgre_er_postinit(struct ip_tunnel *);
 static void ipgre_er_uninit(struct ip_tunnel *);
 
 static void ipgre_er_routing(struct ip_tunnel *, struct sk_buff *);
-static void ipgre_er_xmit(struct ip_tunnel *, struct sk_buff *);
+static void ipgre_er_xmit(struct ip_tunnel *, struct sk_buff *, __be32);
 static __be32 ipgre_er_dst(struct ip_tunnel *, struct sk_buff *);
 
 static struct rtnl_link_ops ipgre_link_ops __read_mostly;
@@ -603,6 +603,7 @@ static int ipgre_rcv(struct sk_buff *skb)
 	int    offset = 4;
 	__be16 gre_proto;
 	unsigned int len;
+	__be32 daddr;
 
 	if (!pskb_may_pull(skb, 16))
 		goto drop_nolock;
@@ -610,6 +611,7 @@ static int ipgre_rcv(struct sk_buff *skb)
 	iph = ip_hdr(skb);
 	h = skb->data;
 	flags = *(__be16*)h;
+	daddr = iph->daddr;
 
 	if (flags&(GRE_CSUM|GRE_KEY|GRE_ROUTING|GRE_SEQ|GRE_VERSION)) {
 		/* Version must be 0 */
@@ -732,7 +734,7 @@ static int ipgre_rcv(struct sk_buff *skb)
 		ipgre_ecn_decapsulate(iph, skb);
 
 		if (IPGRE_ISER(tunnel))
-			ipgre_er_xmit(tunnel, skb);
+			ipgre_er_xmit(tunnel, skb, daddr);
 		netif_rx(skb);
 		read_unlock(&ipgre_lock);
 		return(0);
@@ -1935,7 +1937,7 @@ ipgre_er_routing(struct ip_tunnel *tunnel, struct sk_buff *skb)
 }
 
 static void
-ipgre_er_xmit(struct ip_tunnel *tunnel, struct sk_buff *skb)
+ipgre_er_xmit(struct ip_tunnel *tunnel, struct sk_buff *skb, __be32 daddr)
 {
 	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
 	struct ethhdr *eh = eth_hdr(skb);
@@ -1944,7 +1946,10 @@ ipgre_er_xmit(struct ip_tunnel *tunnel, struct sk_buff *skb)
 	struct er_iface *iface;
 	int vlid, ifid;
 
-	vlid = ipgre_er_vlid(eh->h_source);
+	if (is_multicast_ether_addr(eh->h_dest))
+		vlid = ipgre_er_gtov(daddr);
+	else
+		vlid = ipgre_er_vlid(eh->h_dest);
 	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL)
 		return;
 
