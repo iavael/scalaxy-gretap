@@ -54,6 +54,8 @@
 #include <net/ip6_route.h>
 #endif
 
+#include "../net/bridge/br_private.h"
+
 /*
  * Backport changes in include/ from the following commits:
  *
@@ -2277,15 +2279,33 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 	struct rtable *rt;
 	struct net_device *dev;
 	struct sk_buff *skb;
-	struct iphdr  *iph;
+	struct iphdr *iph;
 	struct er_sre *sre;
-	char *addr;
 	struct rb_node *p;
+	struct net_bridge_port *br_port;
+	struct net_bridge *br = NULL;
+	struct net_bridge_fdb_entry *f;
+	struct hlist_node *h;
+	char *addr;
 	int gre_flags, gre_hlen, sre_len;
+	int nsrc = vlan->vl_nsrc, i;
 
 	if (ip_route_output_key(dev_net(tunnel->dev), &rt, &fl))
 		return;
 	dev = rt->u.dst.dev;
+
+	rcu_read_lock();
+	if (vlan == ertunnel->er_defvlan &&
+	    (br_port = rcu_dereference(tunnel->dev->br_port))) {
+		br = br_port->br;
+		for (i = 0; i < BR_HASH_SIZE; i++)
+			hlist_for_each_entry_rcu(f, h, &br->hash[i], hlist) {
+				if (!compare_ether_addr(f->addr.addr,
+				    tunnel->dev->dev_addr))
+					continue;
+				nsrc++;
+			}
+	}
 
 	gre_flags = tunnel->parms.o_flags | GRE_ROUTING;
 	gre_hlen = tunnel->hlen;
@@ -2293,10 +2313,11 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 		gre_flags |= GRE_CSUM;
 		gre_hlen += 4;
 	}
-	sre_len = sizeof(struct er_sre) + vlan->vl_nsrc * ETH_ALEN;
+	sre_len = sizeof(struct er_sre) + nsrc * ETH_ALEN;
 	if ((skb = alloc_skb(gre_hlen + sre_len + LL_ALLOCATED_SPACE(dev),
 	    GFP_ATOMIC)) == NULL) {
 		ip_rt_put(rt);
+		rcu_read_unlock();
 		return;
 	}
 
@@ -2321,7 +2342,7 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 
 	sre = (struct er_sre *)skb_put(skb, sre_len);
 	sre->sre_af = __constant_htons(ETH_P_TEB);
-	sre->sre_len = htons(vlan->vl_nsrc * ETH_ALEN);
+	sre->sre_len = htons(nsrc * ETH_ALEN);
 	addr = (char *)(sre + 1);
 	for (p = rb_first(&vlan->vl_src); p; p = rb_next(p)) {
 		struct er_iface *iface;
@@ -2330,6 +2351,18 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 		memcpy(addr, iface->if_dev->dev_addr, ETH_ALEN);
 		addr += 6;
 	}
+
+	if (br) {
+		for (i = 0; i < BR_HASH_SIZE; i++)
+			hlist_for_each_entry_rcu(f, h, &br->hash[i], hlist) {
+				if (!compare_ether_addr(f->addr.addr,
+				    tunnel->dev->dev_addr))
+					continue;
+				memcpy(addr, f->addr.addr, ETH_ALEN);
+				addr += 6;
+			}
+	}
+	rcu_read_unlock();
 
 	((__be16 *)(iph + 1))[0] = gre_flags;
 	((__be16 *)(iph + 1))[1] = __constant_htons(ETH_P_TEB);
