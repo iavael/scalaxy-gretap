@@ -2004,9 +2004,6 @@ ipgre_er_dst(struct ip_tunnel *tunnel, struct sk_buff *skb)
 	if (is_multicast_ether_addr(eh->h_dest))
 		return ipgre_er_vtog(vlid);
 
-	if (ipgre_er_vlid(eh->h_dest) != vlid)
-		return 0;
-
 	ifid = ipgre_er_ifid(eh->h_dest);
 	if ((iface = ipgre_er_iface_lookup(&vlan->vl_dst, ifid)))
 		return iface->if_daddr;
