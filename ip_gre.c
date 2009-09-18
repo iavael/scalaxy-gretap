@@ -1997,7 +1997,8 @@ ipgre_er_dst(struct ip_tunnel *tunnel, struct sk_buff *skb)
 
 	vlid = ipgre_er_vlid(eh->h_source);
 	if ((vlan = ipgre_er_vlan_lookup(ertunnel, vlid)) == NULL) {
-		vlan = ertunnel->er_defvlan;
+		if ((vlan = ertunnel->er_defvlan) == NULL)
+			return 0;
 		vlid = vlan->vl_id;
 	}
 
