@@ -1806,8 +1806,13 @@ static int ipgre_er_brctl(struct er_tunnel *, int, int);
 static int ipgre_er_rcv(struct sk_buff *, struct net_device *,
     struct packet_type *, struct net_device *);
 
+static int ipgre_er_event(struct notifier_block *, unsigned long, void *);
 static ssize_t ipgre_er_show(struct device *, struct device_attribute *,
     char *);
+
+static struct notifier_block ipgre_er_notifier = {
+	.notifier_call = ipgre_er_event
+};
 
 static const struct device_attribute ipgre_er_attr = {
 	.attr = { .name = "etherelay", .mode = 0444, .owner = THIS_MODULE },
@@ -2462,10 +2467,14 @@ ipgre_er_brctl(struct er_tunnel *ertunnel, int ifindex, int isadd)
 	if (dev == NULL)
 		return -EINVAL;
 
-	if (isadd)
-		ret = ipgre_er_iface_add_src(ertunnel, dev);
-	else
+	if (isadd) {
+		if ((ret = ipgre_er_iface_add_src(ertunnel, dev)) == 0)
+			/* XXX: who runs apple talk nowadays? */
+			dev->atalk_ptr = ertunnel;
+	} else {
+		dev->atalk_ptr = NULL;
 		ipgre_er_iface_del_src(ertunnel, dev);
+	}
 
 	dev_put(dev);
 	return ret;
@@ -2528,6 +2537,32 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 drop:
 	kfree_skb(skb);
 	return NET_RX_DROP;
+}
+
+static int
+ipgre_er_event(struct notifier_block *unused, unsigned long event, void *ptr)
+{
+	struct net_device *dev = ptr;
+	struct er_tunnel *ertunnel = dev->atalk_ptr;
+
+	if (!net_eq(dev_net(dev), &init_net))
+		return NOTIFY_DONE;
+
+	if (ertunnel == NULL)
+		/* not our slave interface */
+		return NOTIFY_DONE;
+
+	switch (event) {
+	case NETDEV_CHANGEMTU:
+	case NETDEV_CHANGEADDR:
+		/* XXX: should be handled */
+		break;
+	case NETDEV_UNREGISTER:
+		ipgre_er_iface_del_src(ertunnel, dev);
+		break;
+	}
+
+	return NOTIFY_DONE;
 }
 
 static ssize_t
@@ -2595,6 +2630,8 @@ static int __init ipgre_init(void)
 	if (err < 0)
 		goto tap_ops_failed;
 
+	register_netdevice_notifier(&ipgre_er_notifier);
+
 out:
 	return err;
 
@@ -2609,6 +2646,7 @@ gen_device_failed:
 
 static void __exit ipgre_fini(void)
 {
+	unregister_netdevice_notifier(&ipgre_er_notifier);
 	rtnl_link_unregister(&ipgre_tap_ops);
 	rtnl_link_unregister(&ipgre_link_ops);
 	unregister_pernet_gen_device(ipgre_net_id, &ipgre_net_ops);
