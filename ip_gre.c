@@ -1822,13 +1822,13 @@ static const struct device_attribute ipgre_er_attr = {
 static inline int
 ipgre_er_vlid(unsigned char *addr)
 {
-	return ((addr[3] << 7) | (addr[4] >> 1));
+	return ((addr[2] << 8) | addr[3]);
 }
 
 static inline int
 ipgre_er_ifid(unsigned char *addr)
 {
-	return ((addr[4] & 0x01) << 8 | addr[5]);
+	return ((addr[4] << 8) | addr[5]);
 }
 
 static inline __be32
