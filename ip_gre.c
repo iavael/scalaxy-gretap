@@ -2301,6 +2301,15 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 	if (vlan == ertunnel->er_defvlan &&
 	    (br_port = rcu_dereference(tunnel->dev->br_port))) {
 		br = br_port->br;
+
+		/* Announce only on forwarding ports */
+		if (br->stp_enabled != BR_NO_STP &&
+		    br_port->state != BR_STATE_FORWARDING) {
+			ip_rt_put(rt);
+			rcu_read_unlock();
+			return;
+		}
+
 		for (i = 0; i < BR_HASH_SIZE; i++)
 			hlist_for_each_entry_rcu(f, h, &br->hash[i], hlist) {
 				if (!compare_ether_addr(f->addr.addr,
