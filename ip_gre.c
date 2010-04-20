@@ -1756,7 +1756,7 @@ static struct rtnl_link_ops ipgre_tap_ops __read_mostly = {
 #define ER_TUNNEL(iptunnel)	(struct er_tunnel *)((iptunnel) + 1)
 #define IP_TUNNEL(ertunnel)	((struct ip_tunnel *)(ertunnel) - 1)
 
-#define ER_ANNOUNCE_TIME	(5 * HZ)
+#define ER_ANNOUNCE_TIME	(1 * HZ)
 #define ER_EXPIRE_TIME		(5 * ER_ANNOUNCE_TIME)
 
 struct er_vlan {
