@@ -2588,7 +2588,8 @@ ipgre_er_show(struct device *d, struct device_attribute *attr, char *buf)
 	read_lock_bh(&ipgre_lock);
 	for (p = rb_first(&ertunnel->er_vlans); p; p = rb_next(p)) {
 		vlan = rb_entry(p, struct er_vlan, vl_node);
-		count += sprintf(buf + count, "vlan %d\n", vlan->vl_id);
+		count += sprintf(buf + count, "vlan %d (0x%04x)\n",
+		    vlan->vl_id, vlan->vl_id);
 
 		for (pp = rb_first(&vlan->vl_src); pp; pp = rb_next(pp)) {
 			iface = rb_entry(pp, struct er_iface, if_node);
@@ -2602,8 +2603,9 @@ ipgre_er_show(struct device *d, struct device_attribute *attr, char *buf)
 
 			iface = rb_entry(pp, struct er_iface, if_node);
 			a = (unsigned char *)&iface->if_daddr;
-			count += sprintf(buf + count, " %d %d.%d.%d.%d\n",
-			    iface->if_id, a[0], a[1], a[2], a[3]);
+			count += sprintf(buf + count,
+			    " %d (0x%04x) %d.%d.%d.%d\n",
+			    iface->if_id, iface->if_id, a[0], a[1], a[2], a[3]);
 		}
 
 	}
