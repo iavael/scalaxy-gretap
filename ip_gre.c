@@ -1843,6 +1843,23 @@ ipgre_er_gtov(__be32 group)
 	return (ntohl(group) & 0xffff);
 }
 
+/*
+ * Copied from br_fdb.c
+ */
+static inline unsigned long
+br_hold_time(const struct net_bridge *br)
+{
+	return br->topology_change ? br->forward_delay : br->ageing_time;
+}
+
+static inline int
+br_has_expired(const struct net_bridge *br,
+    const struct net_bridge_fdb_entry *fdb)
+{
+	return !fdb->is_static &&
+	    time_before_eq(fdb->ageing_timer + br_hold_time(br), jiffies);
+}
+
 static int
 ipgre_er_init(struct ip_tunnel *tunnel)
 {
@@ -2312,6 +2329,8 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 
 		for (i = 0; i < BR_HASH_SIZE; i++)
 			hlist_for_each_entry_rcu(f, h, &br->hash[i], hlist) {
+				if (br_has_expired(br, f))
+					continue;
 				if (!compare_ether_addr(f->addr.addr,
 				    tunnel->dev->dev_addr))
 					continue;
@@ -2367,6 +2386,8 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 	if (br) {
 		for (i = 0; i < BR_HASH_SIZE; i++)
 			hlist_for_each_entry_rcu(f, h, &br->hash[i], hlist) {
+				if (br_has_expired(br, f))
+					continue;
 				if (!compare_ether_addr(f->addr.addr,
 				    tunnel->dev->dev_addr))
 					continue;
