@@ -2302,7 +2302,7 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 	struct iphdr *iph;
 	struct er_sre *sre;
 	struct rb_node *p;
-	struct net_bridge_port *br_port;
+	struct net_bridge_port *br_port = NULL;
 	struct net_bridge *br = NULL;
 	struct net_bridge_fdb_entry *f;
 	struct hlist_node *h;
@@ -2331,8 +2331,7 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 			hlist_for_each_entry_rcu(f, h, &br->hash[i], hlist) {
 				if (br_has_expired(br, f))
 					continue;
-				if (!compare_ether_addr(f->addr.addr,
-				    tunnel->dev->dev_addr))
+				if (f->dst == br_port)
 					continue;
 				nsrc++;
 			}
@@ -2388,8 +2387,7 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 			hlist_for_each_entry_rcu(f, h, &br->hash[i], hlist) {
 				if (br_has_expired(br, f))
 					continue;
-				if (!compare_ether_addr(f->addr.addr,
-				    tunnel->dev->dev_addr))
+				if (f->dst == br_port)
 					continue;
 				memcpy(addr, f->addr.addr, ETH_ALEN);
 				addr += 6;
