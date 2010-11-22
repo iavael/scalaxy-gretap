@@ -2541,12 +2541,14 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 				continue;
 			if ((skb2 = skb_clone(skb, GFP_ATOMIC))) {
 				skb2->dev = iface->if_dev;
-				dev_queue_xmit(skb2);
+				NF_HOOK(PF_INET, NF_INET_FORWARD, skb2,
+				    orig_dev, skb2->dev, dev_queue_xmit);
 			}
 		}
 
 		skb->dev = tunnel->dev;
-		dev_queue_xmit(skb);
+		NF_HOOK(PF_INET, NF_INET_FORWARD, skb, orig_dev, skb->dev,
+		    dev_queue_xmit);
 		return 0;
 	}
 
@@ -2559,7 +2561,8 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 		skb->dev = tunnel->dev;
 	}
 
-	dev_queue_xmit(skb);
+	NF_HOOK(PF_INET, NF_INET_FORWARD, skb, orig_dev, skb->dev,
+	    dev_queue_xmit);
 	return 0;
 
 drop:
