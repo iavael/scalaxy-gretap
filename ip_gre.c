@@ -1805,6 +1805,7 @@ static int ipgre_er_ioctl(struct net_device *, struct ifreq *, int);
 static int ipgre_er_brctl(struct er_tunnel *, int, int);
 static int ipgre_er_rcv(struct sk_buff *, struct net_device *,
     struct packet_type *, struct net_device *);
+static int ipgre_er_push_xmit(struct sk_buff *);
 
 static int ipgre_er_event(struct notifier_block *, unsigned long, void *);
 static ssize_t ipgre_er_show(struct device *, struct device_attribute *,
@@ -2525,7 +2526,6 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL)
 		goto drop;
 
-	skb_push(skb, ETH_HLEN);
 	eh = eth_hdr(skb);
 
 	if (ipgre_er_vlid(eh->h_source) != vlan->vl_id)
@@ -2543,13 +2543,13 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 			if ((skb2 = skb_clone(skb, GFP_ATOMIC))) {
 				skb2->dev = iface->if_dev;
 				NF_HOOK(PF_BRIDGE, NF_BR_FORWARD, skb2,
-				    orig_dev, skb2->dev, dev_queue_xmit);
+				    orig_dev, skb2->dev, ipgre_er_push_xmit);
 			}
 		}
 
 		skb->dev = tunnel->dev;
 		NF_HOOK(PF_BRIDGE, NF_BR_POST_ROUTING, skb, orig_dev, skb->dev,
-		    dev_queue_xmit);
+		    ipgre_er_push_xmit);
 		return 0;
 	}
 
@@ -2565,12 +2565,21 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 	}
 
 	NF_HOOK(PF_BRIDGE, hook, skb, orig_dev, skb->dev,
-	    dev_queue_xmit);
+	    ipgre_er_push_xmit);
 	return 0;
 
 drop:
 	kfree_skb(skb);
 	return NET_RX_DROP;
+}
+
+static int
+ipgre_er_push_xmit(struct sk_buff *skb)
+{
+	skb_push(skb, ETH_HLEN);
+	dev_queue_xmit(skb);
+
+	return 0;
 }
 
 static int
