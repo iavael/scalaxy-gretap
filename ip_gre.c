@@ -2548,7 +2548,7 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 		}
 
 		skb->dev = tunnel->dev;
-		NF_HOOK(PF_BRIDGE, NF_BR_POST_ROUTING, skb, orig_dev, skb->dev,
+		NF_HOOK(PF_BRIDGE, NF_BR_FORWARD, skb, orig_dev, skb->dev,
 		    ipgre_er_push_xmit);
 		return 0;
 	}
@@ -2561,7 +2561,7 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 		hook = NF_BR_FORWARD;
 	} else {
 		skb->dev = tunnel->dev;
-		hook = NF_BR_POST_ROUTING;
+		hook = NF_BR_FORWARD;
 	}
 
 	NF_HOOK(PF_BRIDGE, hook, skb, orig_dev, skb->dev,
