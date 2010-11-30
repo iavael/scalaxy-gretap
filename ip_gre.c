@@ -26,7 +26,7 @@
 #include <linux/in6.h>
 #include <linux/inetdevice.h>
 #include <linux/igmp.h>
-#include <linux/netfilter_ipv4.h>
+#include <linux/netfilter_bridge.h>
 #include <linux/etherdevice.h>
 #include <linux/if_ether.h>
 #include <linux/version.h>
@@ -2517,6 +2517,7 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 	struct ip_tunnel *tunnel = IP_TUNNEL(ertunnel);
 	struct er_iface *iface;
 	struct ethhdr *eh;
+	int hook;
 
 	if (skb->pkt_type == PACKET_OUTGOING)
 		goto drop;
@@ -2541,13 +2542,13 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 				continue;
 			if ((skb2 = skb_clone(skb, GFP_ATOMIC))) {
 				skb2->dev = iface->if_dev;
-				NF_HOOK(PF_INET, NF_INET_FORWARD, skb2,
+				NF_HOOK(PF_BRIDGE, NF_BR_FORWARD, skb2,
 				    orig_dev, skb2->dev, dev_queue_xmit);
 			}
 		}
 
 		skb->dev = tunnel->dev;
-		NF_HOOK(PF_INET, NF_INET_FORWARD, skb, orig_dev, skb->dev,
+		NF_HOOK(PF_BRIDGE, NF_BR_POST_ROUTING, skb, orig_dev, skb->dev,
 		    dev_queue_xmit);
 		return 0;
 	}
@@ -2557,11 +2558,13 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 		if (iface->if_dev == dev)
 			goto drop;
 		skb->dev = iface->if_dev;
+		hook = NF_BR_FORWARD;
 	} else {
 		skb->dev = tunnel->dev;
+		hook = NF_BR_POST_ROUTING;
 	}
 
-	NF_HOOK(PF_INET, NF_INET_FORWARD, skb, orig_dev, skb->dev,
+	NF_HOOK(PF_BRIDGE, hook, skb, orig_dev, skb->dev,
 	    dev_queue_xmit);
 	return 0;
 
