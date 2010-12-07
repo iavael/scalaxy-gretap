@@ -2518,7 +2518,6 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 	struct ip_tunnel *tunnel = IP_TUNNEL(ertunnel);
 	struct er_iface *iface;
 	struct ethhdr *eh;
-	int hook;
 
 	if (skb->pkt_type == PACKET_OUTGOING)
 		goto drop;
@@ -2558,13 +2557,11 @@ ipgre_er_rcv(struct sk_buff *skb, struct net_device *dev,
 		if (iface->if_dev == dev)
 			goto drop;
 		skb->dev = iface->if_dev;
-		hook = NF_BR_FORWARD;
 	} else {
 		skb->dev = tunnel->dev;
-		hook = NF_BR_FORWARD;
 	}
 
-	NF_HOOK(PF_BRIDGE, hook, skb, orig_dev, skb->dev,
+	NF_HOOK(PF_BRIDGE, NF_BR_FORWARD, skb, orig_dev, skb->dev,
 	    ipgre_er_push_xmit);
 	return 0;
 
