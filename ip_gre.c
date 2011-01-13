@@ -172,6 +172,9 @@ static void ipgre_er_routing(struct ip_tunnel *, struct sk_buff *);
 static void ipgre_er_xmit(struct ip_tunnel *, struct sk_buff *, __be32);
 static __be32 ipgre_er_dst(struct ip_tunnel *, struct sk_buff *);
 
+static int ipgre_er_mac_addr(struct net_device *, void *);
+static int ipgre_er_ioctl(struct net_device *, struct ifreq *, int);
+
 static struct rtnl_link_ops ipgre_link_ops __read_mostly;
 static int ipgre_tunnel_init(struct net_device *dev);
 static void ipgre_tunnel_setup(struct net_device *dev);
@@ -1554,6 +1557,16 @@ static const struct net_device_ops ipgre_tap_netdev_ops = {
 	.ndo_change_mtu		= ipgre_tunnel_change_mtu,
 };
 
+static const struct net_device_ops ipgre_er_netdev_ops = {
+	.ndo_init		= ipgre_tap_init,
+	.ndo_uninit		= ipgre_tunnel_uninit,
+	.ndo_start_xmit		= ipgre_tunnel_xmit,
+	.ndo_set_mac_address 	= ipgre_er_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_do_ioctl	 	= ipgre_er_ioctl,
+	.ndo_change_mtu		= ipgre_tunnel_change_mtu,
+};
+
 static void ipgre_tap_setup(struct net_device *dev)
 {
 
@@ -1815,8 +1828,6 @@ static void ipgre_er_iface_insert(struct rb_root *, struct er_iface *);
 static void ipgre_er_announce(struct er_tunnel *, struct er_vlan *, int);
 static void ipgre_er_timer(unsigned long);
 
-static int ipgre_er_mac_addr(struct net_device *, void *);
-static int ipgre_er_ioctl(struct net_device *, struct ifreq *, int);
 static int ipgre_er_brctl(struct er_tunnel *, int, int);
 static int ipgre_er_rcv(struct sk_buff *, struct net_device *,
     struct packet_type *, struct net_device *);
@@ -1884,8 +1895,7 @@ ipgre_er_init(struct ip_tunnel *tunnel)
 	struct net_device *dev = tunnel->dev;
 	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
 
-	dev->do_ioctl = ipgre_er_ioctl;
-	dev->set_mac_address = ipgre_er_mac_addr;
+	dev->netdev_ops = &ipgre_er_netdev_ops;
 
 	ertunnel->er_vlans = RB_ROOT;
 	ipgre_er_iface_add_src(ertunnel, dev);
