@@ -66,10 +66,7 @@
    solution, but it supposes maintaing new variable in ALL
    skb, even if no tunneling is used.
 
-   Current solution: t->recursion lock breaks dead loops. It looks
-   like dev->tbusy flag, but I preferred new variable, because
-   the semantics is different. One day, when hard_start_xmit
-   will be multithreaded we will have to use skb->encapsulation.
+   Current solution: HARD_TX_LOCK lock breaks dead loops.
 
 
 
@@ -125,8 +122,6 @@ static void ipgre_tunnel_setup(struct net_device *dev);
 static int ipgre_tunnel_bind_dev(struct net_device *dev);
 
 /* Fallback tunnel: no source, no destination, no key, no options */
-
-static int ipgre_fb_tunnel_init(struct net_device *dev);
 
 #define HASH_SIZE  16
 
@@ -430,7 +425,7 @@ static void ipgre_err(struct sk_buff *skb, u32 info)
    by themself???
  */
 
-	struct iphdr *iph = (struct iphdr*)skb->data;
+	struct iphdr *iph = (struct iphdr *)skb->data;
 	__be16	     *p = (__be16*)(skb->data+(iph->ihl<<2));
 	int grehlen = (iph->ihl<<2) + 4;
 	const int type = icmp_hdr(skb)->type;
@@ -604,7 +599,7 @@ static int ipgre_rcv(struct sk_buff *skb)
 #ifdef CONFIG_NET_IPGRE_BROADCAST
 		if (ipv4_is_multicast(iph->daddr)) {
 			/* Looped back packet, drop it! */
-			if (skb->rtable->fl.iif == 0)
+			if (skb_rtable(skb)->fl.iif == 0)
 				goto drop;
 			stats->multicast++;
 			skb->pkt_type = PACKET_BROADCAST;
@@ -645,8 +640,7 @@ static int ipgre_rcv(struct sk_buff *skb)
 		stats->rx_packets++;
 		stats->rx_bytes += len;
 		skb->dev = tunnel->dev;
-		dst_release(skb->dst);
-		skb->dst = NULL;
+		skb_dst_drop(skb);
 		nf_reset(skb);
 
 		skb_reset_network_header(skb);
@@ -665,7 +659,7 @@ drop_nolock:
 	return(0);
 }
 
-static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct ip_tunnel *tunnel = netdev_priv(dev);
 	struct net_device_stats *stats = &tunnel->dev->stats;
@@ -681,17 +675,12 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	__be32 dst;
 	int    mtu;
 
-	if (tunnel->recursion++) {
-		stats->collisions++;
-		goto tx_error;
-	}
-
 	if (dev->type == ARPHRD_ETHER)
 		IPCB(skb)->flags = 0;
 
 	if (dev->header_ops && dev->type == ARPHRD_IPGRE) {
 		gre_hlen = 0;
-		tiph = (struct iphdr*)skb->data;
+		tiph = (struct iphdr *)skb->data;
 	} else {
 		gre_hlen = tunnel->hlen;
 		tiph = &tunnel->parms.iph;
@@ -700,13 +689,13 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	if ((dst = tiph->daddr) == 0) {
 		/* NBMA tunnel */
 
-		if (skb->dst == NULL) {
+		if (skb_dst(skb) == NULL) {
 			stats->tx_fifo_errors++;
 			goto tx_error;
 		}
 
 		if (skb->protocol == htons(ETH_P_IP)) {
-			rt = skb->rtable;
+			rt = skb_rtable(skb);
 			if ((dst = rt->rt_gateway) == 0)
 				goto tx_error_icmp;
 		}
@@ -714,12 +703,12 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 		else if (skb->protocol == htons(ETH_P_IPV6)) {
 			struct in6_addr *addr6;
 			int addr_type;
-			struct neighbour *neigh = skb->dst->neighbour;
+			struct neighbour *neigh = skb_dst(skb)->neighbour;
 
 			if (neigh == NULL)
 				goto tx_error;
 
-			addr6 = (struct in6_addr*)&neigh->primary_key;
+			addr6 = (struct in6_addr *)&neigh->primary_key;
 			addr_type = ipv6_addr_type(addr6);
 
 			if (addr_type == IPV6_ADDR_ANY) {
@@ -738,10 +727,10 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	tos = tiph->tos;
-	if (tos&1) {
+	if (tos == 1) {
+		tos = 0;
 		if (skb->protocol == htons(ETH_P_IP))
 			tos = old_iph->tos;
-		tos &= ~1;
 	}
 
 	{
@@ -768,10 +757,10 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (df)
 		mtu = dst_mtu(&rt->u.dst) - dev->hard_header_len - tunnel->hlen;
 	else
-		mtu = skb->dst ? dst_mtu(skb->dst) : dev->mtu;
+		mtu = skb_dst(skb) ? dst_mtu(skb_dst(skb)) : dev->mtu;
 
-	if (skb->dst)
-		skb->dst->ops->update_pmtu(skb->dst, mtu);
+	if (skb_dst(skb))
+		skb_dst(skb)->ops->update_pmtu(skb_dst(skb), mtu);
 
 	if (skb->protocol == htons(ETH_P_IP)) {
 		df |= (old_iph->frag_off&htons(IP_DF));
@@ -785,14 +774,14 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 #ifdef CONFIG_IPV6
 	else if (skb->protocol == htons(ETH_P_IPV6)) {
-		struct rt6_info *rt6 = (struct rt6_info*)skb->dst;
+		struct rt6_info *rt6 = (struct rt6_info *)skb_dst(skb);
 
-		if (rt6 && mtu < dst_mtu(skb->dst) && mtu >= IPV6_MIN_MTU) {
+		if (rt6 && mtu < dst_mtu(skb_dst(skb)) && mtu >= IPV6_MIN_MTU) {
 			if ((tunnel->parms.iph.daddr &&
 			     !ipv4_is_multicast(tunnel->parms.iph.daddr)) ||
 			    rt6->rt6i_dst.plen == 128) {
 				rt6->rt6i_flags |= RTF_MODIFIED;
-				skb->dst->metrics[RTAX_MTU-1] = mtu;
+				skb_dst(skb)->metrics[RTAX_MTU-1] = mtu;
 			}
 		}
 
@@ -823,8 +812,7 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			ip_rt_put(rt);
 			stats->tx_dropped++;
 			dev_kfree_skb(skb);
-			tunnel->recursion--;
-			return 0;
+			return NETDEV_TX_OK;
 		}
 		if (skb->sk)
 			skb_set_owner_w(new_skb, skb->sk);
@@ -839,8 +827,8 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
 	IPCB(skb)->flags &= ~(IPSKB_XFRM_TUNNEL_SIZE | IPSKB_XFRM_TRANSFORMED |
 			      IPSKB_REROUTED);
-	dst_release(skb->dst);
-	skb->dst = &rt->u.dst;
+	skb_dst_drop(skb);
+	skb_dst_set(skb, &rt->u.dst);
 
 	/*
 	 *	Push down and install the IPIP header.
@@ -860,7 +848,7 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			iph->ttl = old_iph->ttl;
 #ifdef CONFIG_IPV6
 		else if (skb->protocol == htons(ETH_P_IPV6))
-			iph->ttl = ((struct ipv6hdr*)old_iph)->hop_limit;
+			iph->ttl = ((struct ipv6hdr *)old_iph)->hop_limit;
 #endif
 		else
 			iph->ttl = dst_metric(&rt->u.dst, RTAX_HOPLIMIT);
@@ -891,8 +879,7 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	nf_reset(skb);
 
 	IPTUNNEL_XMIT();
-	tunnel->recursion--;
-	return 0;
+	return NETDEV_TX_OK;
 
 tx_error_icmp:
 	dst_link_failure(skb);
@@ -900,8 +887,7 @@ tx_error_icmp:
 tx_error:
 	stats->tx_errors++;
 	dev_kfree_skb(skb);
-	tunnel->recursion--;
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static int ipgre_tunnel_bind_dev(struct net_device *dev)
@@ -954,7 +940,7 @@ static int ipgre_tunnel_bind_dev(struct net_device *dev)
 			addend += 4;
 	}
 	dev->needed_headroom = addend + hlen;
-	mtu -= dev->hard_header_len - addend;
+	mtu -= dev->hard_header_len + addend;
 
 	if (mtu < 68)
 		mtu = 68;
@@ -1022,7 +1008,7 @@ ipgre_tunnel_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd)
 					break;
 				}
 			} else {
-				unsigned nflags=0;
+				unsigned nflags = 0;
 
 				t = netdev_priv(dev);
 
@@ -1164,7 +1150,7 @@ static int ipgre_header(struct sk_buff *skb, struct net_device *dev,
 
 static int ipgre_header_parse(const struct sk_buff *skb, unsigned char *haddr)
 {
-	struct iphdr *iph = (struct iphdr*) skb_mac_header(skb);
+	struct iphdr *iph = (struct iphdr *) skb_mac_header(skb);
 	memcpy(haddr, &iph->saddr, 4);
 	return 4;
 }
@@ -1202,6 +1188,7 @@ static int ipgre_open(struct net_device *dev)
 static int ipgre_close(struct net_device *dev)
 {
 	struct ip_tunnel *t = netdev_priv(dev);
+
 	if (ipv4_is_multicast(t->parms.iph.daddr) && t->mlink) {
 		struct in_device *in_dev;
 		in_dev = inetdev_by_index(dev_net(dev), t->mlink);
@@ -1215,14 +1202,22 @@ static int ipgre_close(struct net_device *dev)
 
 #endif
 
+static const struct net_device_ops ipgre_netdev_ops = {
+	.ndo_init		= ipgre_tunnel_init,
+	.ndo_uninit		= ipgre_tunnel_uninit,
+#ifdef CONFIG_NET_IPGRE_BROADCAST
+	.ndo_open		= ipgre_open,
+	.ndo_stop		= ipgre_close,
+#endif
+	.ndo_start_xmit		= ipgre_tunnel_xmit,
+	.ndo_do_ioctl		= ipgre_tunnel_ioctl,
+	.ndo_change_mtu		= ipgre_tunnel_change_mtu,
+};
+
 static void ipgre_tunnel_setup(struct net_device *dev)
 {
-	dev->init		= ipgre_tunnel_init;
-	dev->uninit		= ipgre_tunnel_uninit;
+	dev->netdev_ops		= &ipgre_netdev_ops;
 	dev->destructor 	= free_netdev;
-	dev->hard_start_xmit	= ipgre_tunnel_xmit;
-	dev->do_ioctl		= ipgre_tunnel_ioctl;
-	dev->change_mtu		= ipgre_tunnel_change_mtu;
 
 	dev->type		= ARPHRD_IPGRE;
 	dev->needed_headroom 	= LL_MAX_HEADER + sizeof(struct iphdr) + 4;
@@ -1231,6 +1226,7 @@ static void ipgre_tunnel_setup(struct net_device *dev)
 	dev->iflink		= 0;
 	dev->addr_len		= 4;
 	dev->features		|= NETIF_F_NETNS_LOCAL;
+	dev->priv_flags		&= ~IFF_XMIT_DST_RELEASE;
 }
 
 static int ipgre_tunnel_init(struct net_device *dev)
@@ -1254,8 +1250,6 @@ static int ipgre_tunnel_init(struct net_device *dev)
 				return -EINVAL;
 			dev->flags = IFF_BROADCAST;
 			dev->header_ops = &ipgre_header_ops;
-			dev->open = ipgre_open;
-			dev->stop = ipgre_close;
 		}
 #endif
 	} else
@@ -1264,7 +1258,7 @@ static int ipgre_tunnel_init(struct net_device *dev)
 	return 0;
 }
 
-static int ipgre_fb_tunnel_init(struct net_device *dev)
+static void ipgre_fb_tunnel_init(struct net_device *dev)
 {
 	struct ip_tunnel *tunnel = netdev_priv(dev);
 	struct iphdr *iph = &tunnel->parms.iph;
@@ -1280,11 +1274,10 @@ static int ipgre_fb_tunnel_init(struct net_device *dev)
 
 	dev_hold(dev);
 	ign->tunnels_wc[0]	= tunnel;
-	return 0;
 }
 
 
-static struct net_protocol ipgre_protocol = {
+static const struct net_protocol ipgre_protocol = {
 	.handler	=	ipgre_rcv,
 	.err_handler	=	ipgre_err,
 	.netns_ok	=	1,
@@ -1324,9 +1317,9 @@ static int ipgre_init_net(struct net *net)
 		err = -ENOMEM;
 		goto err_alloc_dev;
 	}
-
-	ign->fb_tunnel_dev->init = ipgre_fb_tunnel_init;
 	dev_net_set(ign->fb_tunnel_dev, net);
+
+	ipgre_fb_tunnel_init(ign->fb_tunnel_dev);
 	ign->fb_tunnel_dev->rtnl_link_ops = &ipgre_link_ops;
 
 	if ((err = register_netdev(ign->fb_tunnel_dev)))
@@ -1457,16 +1450,22 @@ static int ipgre_tap_init(struct net_device *dev)
 	return 0;
 }
 
+static const struct net_device_ops ipgre_tap_netdev_ops = {
+	.ndo_init		= ipgre_tap_init,
+	.ndo_uninit		= ipgre_tunnel_uninit,
+	.ndo_start_xmit		= ipgre_tunnel_xmit,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_change_mtu		= ipgre_tunnel_change_mtu,
+};
+
 static void ipgre_tap_setup(struct net_device *dev)
 {
 
 	ether_setup(dev);
 
-	dev->init		= ipgre_tap_init;
-	dev->uninit		= ipgre_tunnel_uninit;
+	dev->netdev_ops		= &ipgre_tap_netdev_ops;
 	dev->destructor 	= free_netdev;
-	dev->hard_start_xmit	= ipgre_tunnel_xmit;
-	dev->change_mtu		= ipgre_tunnel_change_mtu;
 
 	dev->iflink		= 0;
 	dev->features		|= NETIF_F_NETNS_LOCAL;
@@ -1526,25 +1525,29 @@ static int ipgre_changelink(struct net_device *dev, struct nlattr *tb[],
 		if (t->dev != dev)
 			return -EEXIST;
 	} else {
-		unsigned nflags = 0;
-
 		t = nt;
 
-		if (ipv4_is_multicast(p.iph.daddr))
-			nflags = IFF_BROADCAST;
-		else if (p.iph.daddr)
-			nflags = IFF_POINTOPOINT;
+		if (dev->type != ARPHRD_ETHER) {
+			unsigned nflags = 0;
 
-		if ((dev->flags ^ nflags) &
-		    (IFF_POINTOPOINT | IFF_BROADCAST))
-			return -EINVAL;
+			if (ipv4_is_multicast(p.iph.daddr))
+				nflags = IFF_BROADCAST;
+			else if (p.iph.daddr)
+				nflags = IFF_POINTOPOINT;
+
+			if ((dev->flags ^ nflags) &
+			    (IFF_POINTOPOINT | IFF_BROADCAST))
+				return -EINVAL;
+		}
 
 		ipgre_tunnel_unlink(ign, t);
 		t->parms.iph.saddr = p.iph.saddr;
 		t->parms.iph.daddr = p.iph.daddr;
 		t->parms.i_key = p.i_key;
-		memcpy(dev->dev_addr, &p.iph.saddr, 4);
-		memcpy(dev->broadcast, &p.iph.daddr, 4);
+		if (dev->type != ARPHRD_ETHER) {
+			memcpy(dev->dev_addr, &p.iph.saddr, 4);
+			memcpy(dev->broadcast, &p.iph.daddr, 4);
+		}
 		ipgre_tunnel_link(ign, t);
 		netdev_state_change(dev);
 	}
