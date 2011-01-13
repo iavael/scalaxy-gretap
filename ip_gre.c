@@ -2396,7 +2396,7 @@ ipgre_er_announce(struct er_tunnel *ertunnel, struct er_vlan *vlan, int vlid)
 		return;
 	}
 
-	skb->dst = &rt->u.dst;
+	skb_dst_set(skb, &rt->u.dst);
 
 	skb_reserve(skb, LL_RESERVED_SPACE(dev));
 
