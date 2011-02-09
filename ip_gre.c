@@ -2649,6 +2649,24 @@ ipgre_er_event(struct notifier_block *unused, unsigned long event, void *ptr)
 	return NOTIFY_DONE;
 }
 
+static void
+sysfs_printf(char **bufp, int *sizep, const char *fmt, ...)
+{
+	va_list ap;
+	int n;
+
+	va_start(ap, fmt);
+	n = vsnprintf(*bufp, *sizep, fmt, ap);
+	va_end(ap);
+
+	if (n < 0)
+		return;
+	*bufp += n;
+	*sizep -= n;
+	if (*sizep < 0)
+		*sizep = 0;
+}
+	
 static ssize_t
 ipgre_er_show(struct device *d, struct device_attribute *attr, char *buf)
 {
@@ -2658,22 +2676,25 @@ ipgre_er_show(struct device *d, struct device_attribute *attr, char *buf)
 	struct er_vlan *vlan;
 	struct er_iface *iface;
 	struct rb_node *p, *pp;
-	ssize_t count = 0;
+	int size = PAGE_SIZE;
+
+	memcpy(buf + size - 4, "...\n", 4);
+	size -= 4;
 
 	read_lock_bh(&ipgre_lock);
 	for (p = rb_first(&ertunnel->er_vlans); p; p = rb_next(p)) {
 		vlan = rb_entry(p, struct er_vlan, vl_node);
-		count += sprintf(buf + count, "vlan %d (0x%04x)\n",
+		sysfs_printf(&buf, &size, "vlan %d (0x%04x)\n",
 		    vlan->vl_id, vlan->vl_id);
 
 		if (vlan->vl_nsrc) {
 			for (pp = rb_first(&vlan->vl_src); pp;
 			    pp = rb_next(pp)) {
 				iface = rb_entry(pp, struct er_iface, if_node);
-				count += sprintf(buf + count, " %s",
+				sysfs_printf(&buf, &size, " %s",
 				    iface->if_dev->name);
 			}
-			count += sprintf(buf + count, "\n");
+			sysfs_printf(&buf, &size, "\n");
 		}
 
 		for (pp = rb_first(&vlan->vl_dst); pp; pp = rb_next(pp)) {
@@ -2681,7 +2702,7 @@ ipgre_er_show(struct device *d, struct device_attribute *attr, char *buf)
 
 			iface = rb_entry(pp, struct er_iface, if_node);
 			a = (unsigned char *)&iface->if_daddr;
-			count += sprintf(buf + count,
+			sysfs_printf(&buf, &size,
 			    " %d (0x%04x) %d.%d.%d.%d\n",
 			    iface->if_id, iface->if_id, a[0], a[1], a[2], a[3]);
 		}
@@ -2689,7 +2710,7 @@ ipgre_er_show(struct device *d, struct device_attribute *attr, char *buf)
 	}
 	read_unlock_bh(&ipgre_lock);
 
-	return count;
+	return PAGE_SIZE - size;
 }
 
 static int
