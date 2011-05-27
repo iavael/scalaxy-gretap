@@ -2604,12 +2604,15 @@ ipgre_er_brctl(struct er_tunnel *ertunnel, int ifindex, int isadd)
 		return -EINVAL;
 
 	if (isadd) {
-		if ((ret = ipgre_er_iface_add_src(ertunnel, dev)) == 0)
+		if ((ret = ipgre_er_iface_add_src(ertunnel, dev)) == 0) {
 			/* XXX: who runs apple talk nowadays? */
 			dev->atalk_ptr = ertunnel;
+			try_module_get(THIS_MODULE);
+		}
 	} else {
 		dev->atalk_ptr = NULL;
 		ipgre_er_iface_del_src(ertunnel, dev);
+		module_put(THIS_MODULE);
 	}
 
 	dev_put(dev);
