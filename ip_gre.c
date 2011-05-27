@@ -2742,8 +2742,9 @@ ipgre_er_show(struct device *d, struct device_attribute *attr, char *buf)
 			for (pp = rb_first(&vlan->vl_src); pp;
 			    pp = rb_next(pp)) {
 				iface = rb_entry(pp, struct er_iface, if_node);
-				n += sprintf(buf + n, "%s\n",
-					     iface->if_dev->name);
+				if (iface->if_dev != tunnel->dev)
+					n += sprintf(buf + n, "%s\n",
+						     iface->if_dev->name);
 			}
 		}
 	}
