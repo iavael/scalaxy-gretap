@@ -153,6 +153,7 @@ enum
    Alexey Kuznetsov.
  */
 
+#define ER_NAME			"etherelay"
 #define IPGRE_ISER(tunnel)	((tunnel)->dev->type == ARPHRD_ETHER && \
 				ipv4_is_multicast((tunnel)->parms.iph.daddr))
 
@@ -162,6 +163,8 @@ struct er_tunnel {
 	struct rb_root		er_vlans;
 	struct timer_list	er_timer;
 	struct er_vlan *	er_defvlan;
+
+	struct proc_dir_entry *	er_proc;
 };
 
 static int ipgre_er_init(struct ip_tunnel *);
@@ -174,6 +177,8 @@ static __be32 ipgre_er_dst(struct ip_tunnel *, struct sk_buff *);
 
 static int ipgre_er_mac_addr(struct net_device *, void *);
 static int ipgre_er_ioctl(struct net_device *, struct ifreq *, int);
+
+static struct proc_dir_entry *ipgre_er_proc;
 
 static struct rtnl_link_ops ipgre_link_ops __read_mostly;
 static int ipgre_tunnel_init(struct net_device *dev);
@@ -1420,6 +1425,12 @@ static int ipgre_init_net(struct net *net)
 	if ((err = register_netdev(ign->fb_tunnel_dev)))
 		goto err_reg_dev;
 
+	ipgre_er_proc = proc_net_mkdir(net, ER_NAME, net->proc_net);
+	if (ipgre_er_proc == NULL) {
+		err = -ENOBUFS;
+		goto err_reg_dev;
+	}
+
 	return 0;
 
 err_reg_dev:
@@ -1435,6 +1446,8 @@ err_alloc:
 static void ipgre_exit_net(struct net *net)
 {
 	struct ipgre_net *ign;
+
+	proc_net_remove(net, ER_NAME);
 
 	ign = net_generic(net, ipgre_net_id);
 	rtnl_lock();
@@ -1784,6 +1797,8 @@ struct er_vlan {
 	struct rb_root		vl_src;
 	int			vl_nsrc;
 	struct rb_root		vl_dst;
+
+	char			vl_name[16];
 };
 
 struct er_iface {
@@ -1836,6 +1851,7 @@ static int ipgre_er_push_xmit(struct sk_buff *);
 static int ipgre_er_event(struct notifier_block *, unsigned long, void *);
 static ssize_t ipgre_er_show(struct device *, struct device_attribute *,
     char *);
+static int ipgre_er_vlan_show(struct seq_file *, void *);
 
 static int ipgre_er_is_dhcp(struct sk_buff *);
 
@@ -1844,8 +1860,22 @@ static struct notifier_block ipgre_er_notifier = {
 };
 
 static const struct device_attribute ipgre_er_attr = {
-	.attr = { .name = "etherelay", .mode = 0444, .owner = THIS_MODULE },
+	.attr = { .name = ER_NAME, .mode = 0444, .owner = THIS_MODULE },
 	.show = ipgre_er_show
+};
+
+static int
+ipgre_er_vlan_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ipgre_er_vlan_show, PDE(inode)->data);
+}
+
+static const struct file_operations ipgre_er_vlan_fops = {
+	.owner = THIS_MODULE,
+	.open = ipgre_er_vlan_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release
 };
 
 static inline int
@@ -1895,6 +1925,10 @@ ipgre_er_init(struct ip_tunnel *tunnel)
 	struct net_device *dev = tunnel->dev;
 	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
 
+	ertunnel->er_proc = proc_mkdir(dev->name, ipgre_er_proc);
+	if (ertunnel->er_proc == NULL)
+		return -ENOBUFS;
+
 	dev->netdev_ops = &ipgre_er_netdev_ops;
 
 	ertunnel->er_vlans = RB_ROOT;
@@ -1911,13 +1945,23 @@ static int
 ipgre_er_postinit(struct ip_tunnel *tunnel)
 {
 	struct net_device *dev = tunnel->dev;
+	int err;
 
-	return sysfs_create_file(&dev->dev.kobj, &ipgre_er_attr.attr);
+	err = sysfs_create_file(&dev->dev.kobj, &ipgre_er_attr.attr);
+	if (err < 0)
+		goto fail1;
+
+	return 0;
+
+fail1:
+	remove_proc_entry(dev->name, ipgre_er_proc);
+	return err;
 }
 
 static void
 ipgre_er_uninit(struct ip_tunnel *tunnel)
 {
+	struct net_device *dev = tunnel->dev;
 	struct er_tunnel *ertunnel = ER_TUNNEL(tunnel);
 	struct er_vlan *vlan;
 	struct rb_node *p;
@@ -1930,6 +1974,8 @@ ipgre_er_uninit(struct ip_tunnel *tunnel)
 		vlan = rb_entry(p, struct er_vlan, vl_node);
 		ipgre_er_vlan_destroy(ertunnel, vlan);
 	}
+
+	remove_proc_entry(dev->name, ipgre_er_proc);
 }
 
 static void
@@ -2182,15 +2228,26 @@ ipgre_er_vlan_create(struct er_tunnel *ertunnel, int id, int nojoin)
 	vlan->vl_dst = RB_ROOT;
 
 	if (!nojoin) {
-		if ((error = ipgre_er_vlan_join(ertunnel, vlan))) {
-			kfree(vlan);
-			return ERR_PTR(error);
-		}
+		if ((error = ipgre_er_vlan_join(ertunnel, vlan)))
+			goto fail1;
 	}
+
+	snprintf(vlan->vl_name, sizeof(vlan->vl_name), "%d", id);
+	if (proc_create_data(vlan->vl_name, 0644, ertunnel->er_proc,
+			     &ipgre_er_vlan_fops, vlan) == NULL) {
+		error = -ENOBUFS;
+		goto fail2;
+	}	
 
 	ipgre_er_vlan_insert(ertunnel, vlan);
 
 	return vlan;
+
+fail2:
+	ipgre_er_vlan_leave(ertunnel, vlan);
+fail1:
+	kfree(vlan);
+	return ERR_PTR(error);
 }
 
 static void
@@ -2198,6 +2255,8 @@ ipgre_er_vlan_destroy(struct er_tunnel *ertunnel, struct er_vlan *vlan)
 {
 	struct er_iface *iface;
 	struct rb_node *p;
+
+	remove_proc_entry(vlan->vl_name, ertunnel->er_proc);
 
 	while ((p = rb_first(&vlan->vl_src))) {
 		iface = rb_entry(p, struct er_iface, if_node);
@@ -2662,24 +2721,6 @@ ipgre_er_event(struct notifier_block *unused, unsigned long event, void *ptr)
 	return NOTIFY_DONE;
 }
 
-static void
-sysfs_printf(char **bufp, int *sizep, const char *fmt, ...)
-{
-	va_list ap;
-	int n;
-
-	va_start(ap, fmt);
-	n = vsnprintf(*bufp, *sizep, fmt, ap);
-	va_end(ap);
-
-	if (n < 0)
-		return;
-	*bufp += n;
-	*sizep -= n;
-	if (*sizep < 0)
-		*sizep = 0;
-}
-	
 static ssize_t
 ipgre_er_show(struct device *d, struct device_attribute *attr, char *buf)
 {
@@ -2689,41 +2730,49 @@ ipgre_er_show(struct device *d, struct device_attribute *attr, char *buf)
 	struct er_vlan *vlan;
 	struct er_iface *iface;
 	struct rb_node *p, *pp;
-	int size = PAGE_SIZE;
-
-	memcpy(buf + size - 4, "...\n", 4);
-	size -= 4;
+	int n = 0;
 
 	read_lock_bh(&ipgre_lock);
 	for (p = rb_first(&ertunnel->er_vlans); p; p = rb_next(p)) {
 		vlan = rb_entry(p, struct er_vlan, vl_node);
-		sysfs_printf(&buf, &size, "vlan %d (0x%04x)\n",
-		    vlan->vl_id, vlan->vl_id);
-
 		if (vlan->vl_nsrc) {
 			for (pp = rb_first(&vlan->vl_src); pp;
 			    pp = rb_next(pp)) {
 				iface = rb_entry(pp, struct er_iface, if_node);
-				sysfs_printf(&buf, &size, " %s",
-				    iface->if_dev->name);
+				n += sprintf(buf + n, "%s\n",
+					     iface->if_dev->name);
 			}
-			sysfs_printf(&buf, &size, "\n");
 		}
-
-		for (pp = rb_first(&vlan->vl_dst); pp; pp = rb_next(pp)) {
-			unsigned char *a;
-
-			iface = rb_entry(pp, struct er_iface, if_node);
-			a = (unsigned char *)&iface->if_daddr;
-			sysfs_printf(&buf, &size,
-			    " %d (0x%04x) %d.%d.%d.%d\n",
-			    iface->if_id, iface->if_id, a[0], a[1], a[2], a[3]);
-		}
-
 	}
 	read_unlock_bh(&ipgre_lock);
 
-	return PAGE_SIZE - size;
+	return n;
+}
+
+static int
+ipgre_er_vlan_show(struct seq_file *seq, void *offset)
+{
+	struct er_vlan *vlan = seq->private;
+	struct er_iface *iface;
+	struct rb_node *pp;
+	char buf[32];
+
+	if (vlan == NULL)
+		return 0;
+
+	read_lock_bh(&ipgre_lock);
+	for (pp = rb_first(&vlan->vl_dst); pp; pp = rb_next(pp)) {
+		unsigned char *a;
+
+		iface = rb_entry(pp, struct er_iface, if_node);
+		a = (unsigned char *)&iface->if_daddr;
+		snprintf(buf, sizeof(buf), "%04x %d.%d.%d.%d\n",
+			 iface->if_id, a[0], a[1], a[2], a[3]);
+		seq_puts(seq, buf);
+	}
+	read_unlock_bh(&ipgre_lock);
+
+	return 0;
 }
 
 static int
