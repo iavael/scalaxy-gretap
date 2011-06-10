@@ -2718,6 +2718,7 @@ ipgre_er_event(struct notifier_block *unused, unsigned long event, void *ptr)
 		break;
 	case NETDEV_UNREGISTER:
 		ipgre_er_iface_del_src(ertunnel, dev);
+		module_put(THIS_MODULE);
 		break;
 	}
 
